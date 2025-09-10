@@ -1,5 +1,20 @@
 # TOTNet: Temporal and Spatial Network for Ball Tracking
 
+If you find this work useful, please cite:
+
+**Paper: [TOTNet: Occlusion-Aware Temporal Tracking for Robust Ball Detection in Sports Videos](https://arxiv.org/abs/2508.09650)**
+
+```bibtex
+@misc{xu2025totnetocclusionawaretemporaltracking,
+      title        = {TOTNet: Occlusion-Aware Temporal Tracking for Robust Ball Detection in Sports Videos}, 
+      author       = {Hao Xu and Arbind Agrahari Baniya and Sam Wells and Mohamed Reda Bouadjenek and Richard Dazely and Sunil Aryal},
+      year         = {2025},
+      eprint       = {2508.09650},
+      archivePrefix= {arXiv},
+      primaryClass = {cs.CV},
+      url          = {https://arxiv.org/abs/2508.09650}, 
+}
+```
 
 ![Net_Architecture-Model_Example](https://github.com/user-attachments/assets/77b3a677-489b-4ee8-b41b-21c46d08c18c)
 
