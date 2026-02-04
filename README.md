@@ -5,14 +5,13 @@ If you find this work useful, please cite:
 **Paper: [TOTNet: Occlusion-Aware Temporal Tracking for Robust Ball Detection in Sports Videos](https://arxiv.org/abs/2508.09650)**
 
 ```bibtex
-@misc{xu2025totnetocclusionawaretemporaltracking,
-      title        = {TOTNet: Occlusion-Aware Temporal Tracking for Robust Ball Detection in Sports Videos}, 
-      author       = {Hao Xu and Arbind Agrahari Baniya and Sam Wells and Mohamed Reda Bouadjenek and Richard Dazely and Sunil Aryal},
-      year         = {2025},
-      eprint       = {2508.09650},
-      archivePrefix= {arXiv},
-      primaryClass = {cs.CV},
-      url          = {https://arxiv.org/abs/2508.09650}, 
+@article{xu2026totnet,
+  title={TOTNet: Occlusion-aware temporal tracking for robust ball detection in sports videos},
+  author={Xu, Hao and Baniya, Arbind Agrahari and Wells, Sam and Bouadjenek, Mohamed Reda and Dazeley, Richard and Aryal, Sunil},
+  journal={Computer Vision and Image Understanding},
+  pages={104657},
+  year={2026},
+  publisher={Elsevier}
 }
 ```
 
