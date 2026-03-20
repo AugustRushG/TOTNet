@@ -32,17 +32,20 @@ TOTNet is specifically designed to utilize temporal and spatial information for 
 ### Installation Steps
 
 1. Clone this repository and navigate to the project directory:
+
    ```bash
    git clone <repository-url>
    cd TOTNet
    ```
 
 2. Install dependencies from the requirements file:
+
    ```bash
    pip install -r requirements.txt
    ```
 
 3. Verify the installation:
+
    ```bash
    python --version  # Ensure it is Python 3.10
    ```
@@ -63,18 +66,20 @@ To facilitate reproducibility and further research, we provide links to access t
   👉 [TTNet Dataset Preparation](https://github.com/maudzung/TTNet-Real-time-Analysis-System-for-Table-Tennis-Pytorch/tree/master/prepare_dataset)
 
 - **TTA Dataset (Table Tennis Australia)**  
-  The TTA dataset is available upon request for research purposes only.  
-  To access the dataset:
-  1. Email us directly.
-  2. You will receive a usage agreement form.
-  3. Once the form is signed and returned, we will grant access to the dataset.
+  The TTA dataset is available for **research purposes only** and can be accessed upon request.  
 
-Please note that the TTA dataset must **not be redistributed** and is strictly intended for non-commercial, academic research use.
+  ### How to Request Access
 
+   1. Download and complete the [TTA_Tracking_Dataset_Access_Agreement](TTA_Tracking_Dataset_Access_Agreement.pdf)
+   2. Email the signed form to **<august.xu@research.deakin.edu.au>**
+   3. Upon verification, dataset access will be granted
+
+   > ⚠️ By requesting access, you agree to the terms outlined in the agreement. Commercial use and redistribution are strictly prohibited.
 
 #### Dataset Organization
 
 After downloading, organize your datasets as follows:
+
 ```
 data/
 ├── tta_dataset/
@@ -89,6 +94,7 @@ data/
 ### Training Command
 
 Use the following command to train the model:
+
 ```bash
 torchrun --nproc_per_node=3 main.py \
     --num_epochs 30 \
@@ -146,7 +152,7 @@ torchrun --nproc_per_node=3 main.py \
 
 3. **Logs and Checkpoints:**
    - Checkpoint files and logs will be saved in the directory specified by `--saved_fn`.
-   
+
 ---
 
 ## Example Dataset Structure
@@ -169,6 +175,7 @@ data/
 ## Example for Single GPU Debugging
 
 To debug or run on a single GPU, use the following modified command:
+
 ```bash
 python main.py \
     --num_epochs 10 \
@@ -184,19 +191,21 @@ python main.py \
     --model_choice 'TOTNet' \
     --val-size 0.2
 ```
+
 This will run on a single GPU without distributed training.
 
 ---
 
 For further details or troubleshooting, refer to the documentation or open an issue in the repository. Happy Training!
 
-
 ## Implementation Details
 
 ### Framework
+
 - **PyTorch**
 
 ### Hardware Specifications
+
 - 2 × NVIDIA **A100** GPUs
 
 ### Training Hyperparameters
@@ -224,7 +233,6 @@ We directly used the [WASB model](https://github.com/nttcom/WASB-SBDT) by [Taras
 ### Note on TTNet Evaluation
 
 TTNet is originally designed for a specific resolution of **128×320 pixels**, as used in its paper. Modifying its architecture to accommodate our input resolution of **288×512 pixels** would require significant changes and could affect its performance. To ensure a **fair comparison**, we evaluated TTNet across all datasets using its native resolution and settings.
-
 
 ## Ablation Study
 
