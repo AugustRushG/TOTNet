@@ -9,9 +9,17 @@ from torch.utils.data import DataLoader, Subset
 
 sys.path.append('../')
 
-from data_process.dataset import  Occlusion_Dataset, Tennis_Dataset, Event_Dataset, Badminton_Dataset, TTA_Dataset
-from data_process.data_utils import get_all_detection_infor, train_val_data_separation, get_all_detection_infor_tennis, get_events_infor_noseg, get_all_detection_infor_badminton, get_all_detection_infor_tta, get_event_detection_infor_tta
-from data_process.transformation import Compose, Random_Crop, Resize, Normalize, Random_Rotate, Random_HFlip, Random_VFlip, Random_Ball_Mask, RandomColorJitter
+from data_process.dataset import Occlusion_Dataset, Tennis_Dataset, Event_Dataset, Badminton_Dataset, TTA_Dataset
+from data_process.transformation import Compose, Resize, Normalize, Random_Rotate, Random_HFlip, Random_VFlip, Random_Ball_Mask, RandomColorJitter
+from data_process.data_utils import (
+    get_all_detection_infor,
+    train_val_data_separation,
+    get_all_detection_infor_tennis,
+    get_events_infor_noseg,
+    get_all_detection_infor_badminton,
+    get_new_tracking_infor
+)
+
 
 
 def create_occlusion_train_val_dataloader(configs, subset_size=None, necessary_prob=1.0):
@@ -23,22 +31,18 @@ def create_occlusion_train_val_dataloader(configs, subset_size=None, necessary_p
         Random_HFlip(p=0.2),
         Random_VFlip(p=0),
         Random_Rotate(rotation_angle_limit=5, p=0.1),
-        Random_Crop(max_reduction_percent=0.2, p=0.25),
         Resize(new_size=configs.img_size, p=necessary_prob),
         Normalize(num_frames_sequence=configs.num_frames, p=necessary_prob),
     ], p=1.)
+
+    print("No normalization in occlusion dataloader")
 
  
     # Load train and validation data information
     train_events_infor, val_events_infor, train_events_label, val_events_label = train_val_data_separation(configs)
 
     if configs.dataset_choice == 'tt':
-        # Create train dataset
-        if configs.event:
-            train_dataset = Event_Dataset(train_events_infor, train_events_label, transform=train_transform,
-                                    num_samples=configs.num_samples)
-        else:
-            train_dataset = Occlusion_Dataset(train_events_infor, train_events_label, transform=train_transform,
+        train_dataset = Occlusion_Dataset(train_events_infor, train_events_label, transform=train_transform,
                                         num_samples=configs.num_samples)
     elif configs.dataset_choice == 'tennis':
         train_dataset = Tennis_Dataset(train_events_infor, train_events_label, transform=train_transform,
@@ -49,7 +53,6 @@ def create_occlusion_train_val_dataloader(configs, subset_size=None, necessary_p
     elif configs.dataset_choice == 'tta':
         train_dataset = TTA_Dataset(train_events_infor, train_events_label, transform=train_transform,
                                     num_samples=configs.num_samples)
-        
     # If subset_size is provided, create a subset for training
     if subset_size is not None:
         train_indices = torch.randperm(len(train_dataset))[:subset_size].tolist()
@@ -70,15 +73,12 @@ def create_occlusion_train_val_dataloader(configs, subset_size=None, necessary_p
     if not configs.no_val:
         val_transform = Compose([
             Resize(new_size=configs.img_size, p=necessary_prob),
+            # Center_Crop(target_size=(224,224), p=necessary_prob),
             Normalize(num_frames_sequence=configs.num_frames, p=necessary_prob),
         ], p=1.)
 
         if configs.dataset_choice == 'tt':
-            if configs.event:
-                val_dataset = Event_Dataset(val_events_infor, val_events_label, transform=val_transform,
-                                            num_samples=configs.num_samples)
-            else:
-                val_dataset = Occlusion_Dataset(val_events_infor, val_events_label, transform=val_transform,
+            val_dataset = Occlusion_Dataset(val_events_infor, val_events_label, transform=val_transform,
                                             num_samples=configs.num_samples)
         elif configs.dataset_choice == 'tennis':
             val_dataset = Tennis_Dataset(val_events_infor, val_events_label, transform=val_transform,
@@ -111,7 +111,9 @@ def create_occlusion_test_dataloader(configs, subset_size=None):
 
     test_transform = Compose([
             Resize(new_size=configs.img_size, p=1.0),
-            Normalize(num_frames_sequence=configs.num_frames, p=1.0),
+            # Resize(new_size=(288, 512), p=1.0),
+            # Center_Crop(target_size=(224,224), p=1.0),
+            Normalize(num_frames_sequence=configs.num_frames, p=1),
         ], p=1.)
     dataset_type = 'test'
     if configs.dataset_choice == 'tt':
@@ -132,14 +134,9 @@ def create_occlusion_test_dataloader(configs, subset_size=None):
         test_dataset = Badminton_Dataset(test_events_infor, test_events_labels, transform=test_transform,
                                  num_samples=configs.num_samples)
     elif configs.dataset_choice == 'tta':
-        if configs.event:
-            test_events_infor, test_events_labels = get_event_detection_infor_tta(configs, 'test')
-            test_dataset = TTA_Dataset(test_events_infor, test_events_labels, transform=test_transform,
-                                    num_samples=configs.num_samples)
-        else:
-            test_events_infor, test_events_labels = get_all_detection_infor_tta(configs, 'test')
-            test_dataset = TTA_Dataset(test_events_infor, test_events_labels, transform=test_transform,
-                                    num_samples=configs.num_samples)
+        test_events_infor, test_events_labels = get_new_tracking_infor(configs.tta_tracking_dataset_dir, 'test', num_frames=configs.num_frames, resize=configs.resize, bidirect=configs.bidirect)
+        test_dataset = TTA_Dataset(test_events_infor, test_events_labels, transform=test_transform,
+                                num_samples=configs.num_samples)
     test_sampler = None
 
     # If subset_size is provided, create a subset for training
@@ -154,6 +151,7 @@ def create_occlusion_test_dataloader(configs, subset_size=None):
                                  sampler=test_sampler, drop_last=False)
 
     return test_dataloader
+
 
 
 def draw_image_with_ball(image_tensor, ball_location_tensor, out_images_dir, example_index):
@@ -196,12 +194,15 @@ if __name__ == '__main__':
     configs = parse_configs()
     configs.distributed = False  # For testing
     configs.batch_size = 1
-    configs.img_size = (288, 512)
+    # configs.img_size = (1080, 1920)
+    configs.img_size = (288,512)
     configs.interval = 1
     configs.num_frames = 5
     configs.occluded_prob = 0
-    # configs.bidirect = True
-    configs.dataset_choice = 'tennis'
+    configs.bidirect = True
+    configs.dataset_choice = 'tta'
+    configs.mimo = False
+    # configs.new_data = True
     # configs.event = True
     # configs.smooth_labelling = True
     
@@ -212,37 +213,34 @@ if __name__ == '__main__':
     torch.cuda.manual_seed_all(seed)
 
     # Create Masked dataloaders 
-    train_dataloader, val_dataloader, train_sampler = create_occlusion_train_val_dataloader(configs, necessary_prob=0)
-    print('len train_dataloader: {}, val_dataloader: {}'.format(len(train_dataloader), len(val_dataloader)))
-    
+    train_dataloader, val_dataloader, train_sampler = create_occlusion_train_val_dataloader(configs, necessary_prob=1.0)
     test_dataloader = create_occlusion_test_dataloader(configs, configs.num_samples)
+
+    print('len train_dataloader: {}, val_dataloader: {}'.format(len(train_dataloader), len(val_dataloader)))
     print(f"len test_loader {len(test_dataloader)}")
 
     frame_id = configs.num_frames-1
 
-    if configs.event == False:
-        batch_data, (masked_frameids, ball_xys, visibility, events) = next(iter(test_dataloader))
-    else:
-        batch_data, (masked_frameids, ball_xys, visibility, events) = next(iter(train_dataloader))
-        print(f"Batch event shape is: {events.shape}, events are {events}")
+    batch_data, (masked_frameids, ball_xys, visibility, events) = next(iter(test_dataloader))
+    # last_batch = list(train_dataloader)[0]
+    # batch_data, (masked_frameids, ball_xys, visibility, events) = last_batch
 
-    
     if configs.event or configs.bidirect:
         frame_id = configs.num_frames//2
+
+    print(f"frame id is {frame_id}")
     
-    # Iterate through the train_dataloader to find events == [0, 1]
-    for batch_data, (masked_frameids, ball_xys, visibility, events) in train_dataloader:
-        if (visibility==3).all(dim=0).any():  # Check if any row matches [0, 1]
-            print("Found example with events == [0, 1]")
-            print(f"Batch Data Shape: {batch_data.shape}")
-            print(f"Events: {events}")
-            break
     # print(f"unique number of batch_data is {torch.unique(batch_data)}")
     # Check the shapes
     # print(f'ball frame is {frame_id}, print event is {event_classes}')
     print(f'Batch data shape: {batch_data.shape}')      # Expected: [B, N, C, H, W]
-    print(f'Batch ball_xy shape: {ball_xys.shape}')  # Expected: [8, 2], 2 represents X and Y of the coordinaties 
-    print(torch.unique(ball_xys))
+
+    if configs.mimo:
+        print(ball_xys)
+        print(f'Batch ball_xy length {len(ball_xys)} shape: {ball_xys[0].shape}')  # Expected: [8, 2], 2 represents X and Y of the coordinaties 
+    else:
+        print(f'Batch ball_xy shape: {ball_xys.shape}')  # Expected: [8, 2], 2 represents X and Y of the coordinaties 
+        print(torch.unique(ball_xys))
    
    
     # Select the first sample in the batch
@@ -265,7 +263,9 @@ if __name__ == '__main__':
         sample_data = batch_data[batch_index]  # Shape: [N, C, H, W]
         masked_image = sample_data[frame_id]  # Shape: [C, H, W]
         ball_xy = ball_xys[batch_index].cpu().numpy()  # Ball coordinates for this sample, as a list
-
+        if configs.mimo:
+            ball_xy = (int(ball_xy[frame_id][0]), int(ball_xy[frame_id][1]))
+            print(ball_xy)
         # Collect all frames (original and masked) for visualization
         frame_images = []
 

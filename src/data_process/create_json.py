@@ -36,7 +36,7 @@ def create_image_json(directory, output_file, base_path="/data/local-files?d=tta
     print(f"JSON file created: {output_file}")
 
 # Example usage
-directory = "/home/s224705071/github/PhysicsInformedDeformableAttentionNetwork/data/tta_dataset/training/images/24Paralympics_FRA_M4_Addis_AUS_v_Chaiwut_THA/Game_2"  # Replace with the actual directory
+directory = "/home/s224705071/github/PhysicsInformedDeformableAttentionNetwork/data/tta_dataset/training/images/24Paralympics_FRA_M9_Ma_AUS_v_Didier_FRA/Game_1"  # Replace with the actual directory
 output_file = "image_list.json"  # Path to save the JSON
-base_path = '/data/local-files?d=tta_dataset/training/images/24Paralympics_FRA_M4_Addis_AUS_v_Chaiwut_THA/Game_2'
+base_path = '/data/local-files?d=tta_dataset/training/images/24Paralympics_FRA_M9_Ma_AUS_v_Didier_FRA/Game_1'
 create_image_json(directory, output_file, base_path)

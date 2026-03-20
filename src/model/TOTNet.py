@@ -1,15 +1,11 @@
 import torch
 import torch.nn as nn
 import sys
-import cv2 
-import torch.nn.functional as F
 import time
-import torchvision.models as models
-import torchvision.ops.deform_conv
 from einops import rearrange
 
 sys.path.append('../')
-from model.backbone_positional_encoding import create_positional_encoding
+
     
 
 class ConvBlock(nn.Module):
@@ -238,10 +234,10 @@ class TemporalConvNet(nn.Module):
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
         self.softmax = nn.Softmax(dim=-1)
 
-        size = (num_frames, input_shape[0], input_shape[1])
-        size1 = (5, 144, 256)
-        size2 = (3, 72, 128)
-        size3 = (1, 36, 64)
+        size = (num_frames, input_shape[0], input_shape[1])  # Keep original shape
+        size1 = (5, input_shape[0] // 2, input_shape[1] // 2)  # Integer division
+        size2 = (3, input_shape[0] // 4, input_shape[1] // 4)  # Integer division
+        size3 = (1, input_shape[0] // 8, input_shape[1] // 8)  # Integer division
 
 
         # block 1
@@ -334,60 +330,106 @@ class TemporalConvNet(nn.Module):
 
         x = self.temp_reduce(x) 
         out = x.squeeze(dim=1).squeeze(dim=1) #[B, H, W]
+        heatmap = out.view(B, H*W) # Reshape to [B, H*W] for softmax
+        heatmap = self.softmax(heatmap)  # Apply softmax to the heatmap
+        # heatmap = heatmap.view(B, H, W)  # Reshape back to [B, H, W]
 
-        # Sum along the width to get a vertical heatmap (along H dimension)
-        vertical_heatmap = out.max(dim=2)[0]   # Shape: [B, H]
-        # Sum along the height to get a horizontal heatmap (along W dimension)
-        horizontal_heatmap = out.max(dim=1)[0]   # Shape: [B, W]
-        
-        vertical_heatmap = self.softmax(vertical_heatmap)
-        horizontal_heatmap = self.softmax(horizontal_heatmap) 
-
-        return (horizontal_heatmap, vertical_heatmap), None
+        return heatmap
 
 
 
 def build_motion_model_light(args):
     # motion_model = MotionModel()
-    model = TemporalConvNet(input_shape=(288, 512), spatial_channels=64, num_frames=args.num_frames).to(args.device)
+    model = TemporalConvNet(input_shape=(288, 512), spatial_channels=args.num_channels, num_frames=args.num_frames).to(args.device)
     return model
 
+
+def benchmark_fps(model, batch_data, device="cuda", num_warmup=10, num_iters=30):
+    """
+    Benchmark the forward pass FPS of a PyTorch model.
+
+    Args:
+        model (torch.nn.Module): The model to benchmark.
+        batch_data (torch.Tensor): Input batch. Shape could be
+            - [B, C, H, W] for images
+            - [B, T, C, H, W] for video clips
+        device (str): "cuda" or "cpu".
+        num_warmup (int): Number of warmup iterations.
+        num_iters (int): Number of timed iterations.
+
+    Returns:
+        dict: { "avg_time": float, "fps_frames": float, "fps_clips": float }
+    """
+    model.eval()
+    batch_data = batch_data.to(device)
+
+    # Warmup runs (stabilize GPU/CPU performance)
+    for _ in range(num_warmup):
+        with torch.no_grad():
+            _ = model(batch_data)
+    if device == "cuda":
+        torch.cuda.synchronize()
+
+    # Timed runs
+    total_time = 0.0
+    for _ in range(num_iters):
+        if device == "cuda":
+            torch.cuda.synchronize()
+        start_time = time.time()
+
+        with torch.no_grad():
+            _ = model(batch_data)
+
+        if device == "cuda":
+            torch.cuda.synchronize()
+        end_time = time.time()
+        total_time += (end_time - start_time)
+
+    avg_time = total_time / num_iters  # seconds per forward pass
+
+    # Throughput calculations
+    if batch_data.ndim == 4:   # [B, C*T, H, W] = images
+        num_frames = batch_data.shape[0]
+        num_clips = num_frames/3
+    elif batch_data.ndim == 5: # [B, T, C, H, W] = video clips
+        num_clips = batch_data.shape[0]
+        num_frames = num_clips * batch_data.shape[1]
+    else:
+        raise ValueError("Unsupported input shape for batch_data.")
+
+    fps_frames = num_frames / avg_time
+    fps_clips = num_clips / avg_time
+
+    return {
+        "avg_time": avg_time,
+        "fps_frames": fps_frames,
+        "fps_clips": fps_clips
+    }
 
 
 if __name__ == '__main__':
     from config.config import parse_configs
     from data_process.dataloader import create_occlusion_train_val_dataloader
     from model.model_utils import get_num_parameters
+    from ptflops import get_model_complexity_info
 
     configs = parse_configs()
     configs.num_frames = 5
-    configs.device = 'cpu'
+    configs.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     configs.batch_size = 5
     configs.img_size = (288, 512)
     configs.dataset_choice = 'tennis'
-    # Create dataloaders
-    train_dataloader, val_dataloader, train_sampler = create_occlusion_train_val_dataloader(configs)
-    batch_data, (masked_frameids, labels, _, _) = next(iter(train_dataloader))
-    batch_data = batch_data.to(configs.device)
+    configs.num_channels = 32
 
-    # print(torch.unique(batch_data))
-    # batch_data = torch.randn([8, 5, 3, 288, 512])
-
-    B, N, C, H, W = batch_data.shape
-
-    # network = SaliencyMask().to(configs.device)
-    # print(f"attention model num params is {get_num_parameters(network)}")
-    # output = network(batch_data.float())
-
+    batch_data = torch.randn([5, 5, 3, 288, 512])
+    
     motion_model = build_motion_model_light(configs)
     print(f"motion model num params is {get_num_parameters(motion_model)}")
-    # Start timer for data loading
-    start_time = time.time()
-    #Forward pass through the backbone
-    motion_features, cls = motion_model(batch_data.float())
-    forward_pass_time = time.time() - start_time
-    print(f"Forward pass time: {forward_pass_time:.4f} seconds")
-    print(f"Features stacked_features Shape: horizontal {motion_features[0].shape},   vertical {motion_features[1].shape}")  # Expected: [B*P, 3, 2048, 34, 60]
-    print(f"cls score is {cls}")
-    print(torch.unique(motion_features[0]))
     
+    results = benchmark_fps(motion_model, batch_data, device=configs.device)
+
+    print(f"Average time per pass: {results['avg_time']:.4f} s")
+    print(f"Throughput: {results['fps_frames']:.2f} frames/s")
+    print(f"Throughput: {results['fps_clips']:.2f} clips/s")
+
+

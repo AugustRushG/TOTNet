@@ -6,6 +6,7 @@ import torch
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau, LambdaLR
 import torch.distributed as dist
 import subprocess
+import time
 
 def print_nvidia_driver_version():
     try:
@@ -101,3 +102,66 @@ def to_python_float(t):
         return t.item()
     else:
         return t[0]
+    
+
+def benchmark_fps(model, batch_data, device="cuda", num_warmup=10, num_iters=30):
+    """
+    Benchmark the forward pass FPS of a PyTorch model.
+
+    Args:
+        model (torch.nn.Module): The model to benchmark.
+        batch_data (torch.Tensor): Input batch. Shape could be
+            - [B, C, H, W] for images
+            - [B, T, C, H, W] for video clips
+        device (str): "cuda" or "cpu".
+        num_warmup (int): Number of warmup iterations.
+        num_iters (int): Number of timed iterations.
+
+    Returns:
+        dict: { "avg_time": float, "fps_frames": float, "fps_clips": float }
+    """
+    model.eval()
+    batch_data = batch_data.to(device)
+
+    # Warmup runs (stabilize GPU/CPU performance)
+    for _ in range(num_warmup):
+        with torch.no_grad():
+            _ = model(batch_data)
+    if device.startswith("cuda"):
+        torch.cuda.synchronize()
+
+    # Timed runs
+    total_time = 0.0
+    for _ in range(num_iters):
+        if device.startswith("cuda"):
+            torch.cuda.synchronize()
+        start_time = time.time()
+
+        with torch.no_grad():
+            _ = model(batch_data)
+
+        if device.startswith("cuda"):
+            torch.cuda.synchronize()
+        end_time = time.time()
+        total_time += (end_time - start_time)
+
+    avg_time = total_time / num_iters  # seconds per forward pass
+
+    # Throughput calculations
+    if batch_data.ndim == 4:   # [B, C, H, W] = images
+        num_clips = batch_data.shape[0]
+        num_frames = num_clips
+    elif batch_data.ndim == 5: # [B, T, C, H, W] = video clips
+        num_clips = batch_data.shape[0]
+        num_frames = num_clips * batch_data.shape[1]
+    else:
+        raise ValueError("Unsupported input shape for batch_data.")
+
+    fps_frames = num_frames / avg_time
+    fps_clips = num_clips / avg_time
+
+    return {
+        "avg_time": avg_time,
+        "fps_frames": fps_frames,
+        "fps_clips": fps_clips
+    }

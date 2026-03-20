@@ -109,13 +109,17 @@ class MonoTrack(nn.Module):
         # x = self.softmax(x)
         out = x.view(batch_size, self.out_channels, H, W) #[B, 1, H, W]
 
-        vertical_heatmap = out.max(dim=-1)[0].squeeze(dim=1)  # Max along width (W)
-        horizontal_heatmap = out.max(dim=-2)[0].squeeze(dim=1)  # Max along height (H)
+        out = x.squeeze(dim=1).squeeze(dim=1) #[B, H, W]
+        heatmap = out.view(batch_size, H*W) # Reshape to [B, H*W] for softmax
+        heatmap = torch.softmax(heatmap, dim=-1)  # Apply softmax to the heatmap
 
-        vertical_heatmap = torch.softmax(vertical_heatmap, dim=-1)
-        horizontal_heatmap = torch.softmax(horizontal_heatmap, dim=-1)
+        # vertical_heatmap = out.max(dim=-1)[0].squeeze(dim=1)  # Max along width (W)
+        # horizontal_heatmap = out.max(dim=-2)[0].squeeze(dim=1)  # Max along height (H)
 
-        return (horizontal_heatmap, vertical_heatmap), None              
+        # vertical_heatmap = torch.softmax(vertical_heatmap, dim=-1)
+        # horizontal_heatmap = torch.softmax(horizontal_heatmap, dim=-1)
+
+        return heatmap         
     
     def _init_weights(self):
         for module in self.modules():
@@ -140,26 +144,24 @@ if __name__ == '__main__':
     from losses_metrics.metrics import heatmap_calculate_metrics
     from model.model_utils import get_num_parameters
     configs = parse_configs()
-    configs.device = 'cpu'
+    configs.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     configs.num_frames = 5
     configs.img_size = (288, 512)
     configs.dataset_choice = 'tennis'
 
-    train_dataloader, val_dataloader, train_sampler = create_occlusion_train_val_dataloader(configs) 
-    batch_data, (masked_frameids, labels, visibilities, status) = next(iter(train_dataloader)) # batch data will be in shape [B, N, C, H, W]
-    B, N, C, H, W = batch_data.shape
-
-    # Permute to bring frames and channels together
-    stacked_data = batch_data.permute(0, 2, 1, 3, 4).contiguous()  # Shape: [B, C, N, H, W]
-
-    # Reshape to combine frames into the channel dimension
-    stacked_data = stacked_data.view(B, N * C, H, W).float()  # Shape: [B, N*C, H, W]
-    stacked_data = stacked_data.to(configs.device)
 
     # model = build_TrackerNet(configs)
+    dummy_data = torch.randn([8, 15, 288, 512])  # Dummy data for testing
     model = build_monoTrack(configs)
-    print(f"motion model num params is {get_num_parameters(model)}")
-    start_time = time.time()
-    out = model(stacked_data)
-    forward_pass_time = time.time() - start_time
-    print(f"Forward pass time: {forward_pass_time:.4f} seconds")
+    
+    from TOTNet import benchmark_fps
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Number of trainable parameters: {parameters/1e6:.2f} M")
+    batch_data = torch.randn([5, 15, 288, 512])
+    results = benchmark_fps(model, batch_data, device=device)
+
+    print(f"Average time per pass: {results['avg_time']:.4f} s")
+    print(f"Throughput: {results['fps_frames']:.2f} frames/s")
+    print(f"Throughput: {results['fps_clips']:.2f} clips/s")
+

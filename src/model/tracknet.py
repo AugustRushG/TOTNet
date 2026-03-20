@@ -18,7 +18,7 @@ class ConvBlock(nn.Module):
         return self.block(x)
 
 class BallTrackerNet(nn.Module):
-    def __init__(self, in_channels=9, out_channels=256):
+    def __init__(self, in_channels=9, out_channels=1):
         super().__init__()
         self.out_channels = out_channels
         self.in_channels = in_channels
@@ -84,22 +84,17 @@ class BallTrackerNet(nn.Module):
         x = self.conv17(x)
         x = self.conv18(x)
         # x = self.softmax(x)
-        out = x.view(batch_size, self.out_channels, H, W)
-        # Sum along the width to get a vertical heatmap (along H dimension)
-        vertical_heatmap = out.sum(dim=1).sum(dim=-1)   # Shape: [B, H]
-        # Sum along the height to get a horizontal heatmap (along W dimension)
-        horizontal_heatmap = out.sum(dim=1).sum(dim=-2)   # Shape: [B, W]
+        out = x.view(batch_size, self.out_channels, H, W) #[b,1,h,w]
 
-        # # Min-max normalization for vertical and horizontal heatmaps
-        vertical_heatmap = (vertical_heatmap - vertical_heatmap.min()) / (vertical_heatmap.max() - vertical_heatmap.min() + 1e-8)
-        horizontal_heatmap = (horizontal_heatmap - horizontal_heatmap.min()) / (horizontal_heatmap.max() - horizontal_heatmap.min() + 1e-8)
+        vertical_heatmap = out.max(dim=-1)[0].squeeze(dim=1)  # Max along width (W)
+        horizontal_heatmap = out.max(dim=-2)[0].squeeze(dim=1)  # Max along height (H)
 
         # vertical_heatmap = torch.sigmoid(vertical_heatmap)
         # horizontal_heatmap = torch.sigmoid(horizontal_heatmap)
         vertical_heatmap = torch.softmax(vertical_heatmap, dim=-1)
         horizontal_heatmap = torch.softmax(horizontal_heatmap, dim=-1)
 
-        return (horizontal_heatmap, vertical_heatmap)               
+        return (horizontal_heatmap, vertical_heatmap), None               
     
     def _init_weights(self):
         for module in self.modules():
@@ -184,13 +179,17 @@ class BallTrackerNetV2(nn.Module):
         # x = self.softmax(x)
         out = x.view(batch_size, self.out_channels, H, W) #[B, 1, H, W]
 
-        vertical_heatmap = out.max(dim=-1)[0].squeeze(dim=1)  # Max along width (W)
-        horizontal_heatmap = out.max(dim=-2)[0].squeeze(dim=1)  # Max along height (H)
+        out = x.squeeze(dim=1).squeeze(dim=1) #[B, H, W]
+        heatmap = out.view(batch_size, H*W) # Reshape to [B, H*W] for softmax
+        heatmap = torch.softmax(heatmap, dim=-1)  # Apply softmax to the heatmap
 
-        vertical_heatmap = torch.softmax(vertical_heatmap, dim=-1)
-        horizontal_heatmap = torch.softmax(horizontal_heatmap, dim=-1)
+        # vertical_heatmap = out.max(dim=-1)[0].squeeze(dim=1)  # Max along width (W)
+        # horizontal_heatmap = out.max(dim=-2)[0].squeeze(dim=1)  # Max along height (H)
 
-        return (horizontal_heatmap, vertical_heatmap), None              
+        # vertical_heatmap = torch.softmax(vertical_heatmap, dim=-1)
+        # horizontal_heatmap = torch.softmax(horizontal_heatmap, dim=-1)
+
+        return heatmap            
     
     def _init_weights(self):
         for module in self.modules():
@@ -311,45 +310,25 @@ if __name__ == '__main__':
     from losses_metrics.losses import Heatmap_Ball_Detection_Loss
     from losses_metrics.metrics import heatmap_calculate_metrics
     from model.model_utils import get_num_parameters
+    from ptflops import get_model_complexity_info
+    import time
     configs = parse_configs()
-    configs.device = 'cpu'
+    configs.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     configs.num_frames = 5
-    configs.img_size = (360, 640)
+    configs.img_size = (288, 512)
 
-    train_dataloader, val_dataloader, train_sampler = create_occlusion_train_val_dataloader(configs) 
-    batch_data, (masked_frameids, labels) = next(iter(train_dataloader)) # batch data will be in shape [B, N, C, H, W]
-    B, N, C, H, W = batch_data.shape
-
-    # Permute to bring frames and channels together
-    stacked_data = batch_data.permute(0, 2, 1, 3, 4).contiguous()  # Shape: [B, C, N, H, W]
-
-    # Reshape to combine frames into the channel dimension
-    stacked_data = stacked_data.view(B, N * C, H, W).float()  # Shape: [B, N*C, H, W]
-    stacked_data = stacked_data.to(configs.device)
-
+    dummy_data = torch.randn([8, 15, 288, 512])  # Dummy data for testing
     # model = build_TrackerNet(configs)
     model = build_TrackNetV2(configs)
-    print(f"motion model num params is {get_num_parameters(model)}")
-    start_time = time.time()
-    out = model(stacked_data)
-    forward_pass_time = time.time() - start_time
-    print(f"Forward pass time: {forward_pass_time:.4f} seconds")
-    loss = Heatmap_Ball_Detection_Loss(h=H, w = W)
-    mse, rmse, mae, euclidean_distance = heatmap_calculate_metrics(out, labels)
-    print(torch.unique(out[0]), torch.unique(out[1]))
-
-    pred_x_logits, pred_y_logits = out
-    pred_x_logit = pred_x_logits[0]  # Shape: [W]
-    pred_y_logit = pred_y_logits[0]  # Shape: [H]
-    # Predicted coordinates are extracted by taking the argmax over logits
-    x_pred_indice = torch.argmax(pred_x_logit, dim=0)  # [W] -> scalar representing the predicted x index
-    y_pred_indice = torch.argmax(pred_y_logit, dim=0)  # [H] -> scalar representing the predicted y index
-    x_pred = x_pred_indice.float()
-    y_pred = y_pred_indice.float()
-    print(f"out shape {out[0].shape, out[1].shape}")
-    print(f"loss is {loss((out[0], out[1]), labels)}")
-    print(f"rmse is {rmse}")
-    print(x_pred, y_pred, labels[0])
-   
     
+    from TOTNet import benchmark_fps
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Number of trainable parameters: {parameters/1e6:.2f} M")
+    batch_data = torch.randn([5, 15, 288, 512])
+    results = benchmark_fps(model, batch_data, device=device)
+
+    print(f"Average time per pass: {results['avg_time']:.4f} s")
+    print(f"Throughput: {results['fps_frames']:.2f} frames/s")
+    print(f"Throughput: {results['fps_clips']:.2f} clips/s")
     

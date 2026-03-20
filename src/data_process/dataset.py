@@ -3,6 +3,7 @@ import os
 import numpy as np
 import time
 import torch
+import torchvision.transforms as transforms
 
 from torch.utils.data import Dataset
 import torch.nn.functional as F
@@ -419,7 +420,6 @@ class TTA_Dataset(Dataset):
         ball_xy = self.events_label[index][0]
         visibility = self.events_label[index][1]
         status = self.events_label[index][2]
-        one_hot_status = F.one_hot(torch.tensor(status), num_classes=2)
 
         imgs = []
         for img_path in img_path_list:
@@ -449,7 +449,202 @@ class TTA_Dataset(Dataset):
             i+=1
         
         image_list_np = np.array(image_list)
-        return image_list_np, (masked_frameid, np.array(ball_xy.astype(int)), visibility, one_hot_status)
+        return image_list_np, (masked_frameid, np.array(ball_xy.astype(int)), visibility, status)
+
+class TTA_Dataset_MIMO(Dataset):
+    def __init__(self, events_infor, events_label, transform=None, num_samples=None, color=(0, 0, 0)):
+        self.events_infor = events_infor
+        self.events_label = events_label
+        self.transform = transform
+        self.color = color
+
+        if num_samples is not None:
+            self.events_infor = self.events_infor[:num_samples]
+
+    def __len__(self):
+        return len(self.events_infor)
+
+    def __getitem__(self, index):
+        img_path_list = self.events_infor[index]
+        ball_xys = self.events_label[index][0]
+        visibilities = self.events_label[index][1]
+        status = self.events_label[index][2]
+        imgs = []
+        for img_path in img_path_list:
+            img = cv2.imread(img_path)
+            if img is None:
+                print(f"Warning: Image not found or can't be read at path: {img_path}")
+                placeholder_img = np.full((1080, 1920, 3), self.color, dtype=np.uint8)
+                imgs.append(placeholder_img)
+            else:
+                imgs.append(img)
+        # Apply augmentation
+        if self.transform:
+            imgs, ball_xys, visibilities = self.transform(imgs, ball_xys, visibilities)
+        
+        converted_imgs = []
+        for img in imgs:    
+            # after transform all images will be in shape (H, W, C)
+            img = np.transpose(img, (2, 0, 1))  # Now img is (C, H, W)
+            converted_imgs.append(img)
+      
+        image_list=[]
+
+        masked_frameid = len(converted_imgs)-1
+        i = 0
+        while i < len(converted_imgs):
+            image_list.append(np.array(converted_imgs[i]))
+            i+=1
+        
+        image_list_np = np.array(image_list)
+        ball_xys_np = np.array(ball_xys)
+        visibilities_np = np.array(visibilities)
+        return image_list_np, (masked_frameid, ball_xys_np, visibilities_np, status)
+
+
+class TT_Dataset_MIMO(Dataset):
+    def __init__(self, events_infor, events_label, transform=None, num_samples=None):
+        self.events_infor = events_infor
+        self.events_label = events_label
+        self.transform = transform
+
+        if num_samples is not None:
+            self.events_infor = self.events_infor[:num_samples]
+
+    def __len__(self):
+        return len(self.events_infor)
+
+    def __getitem__(self, index):
+        img_path_list = self.events_infor[index]
+        ball_xys = self.events_label[index][0]
+        visibilities = self.events_label[index][1]
+        status = self.events_label[index][2]
+
+        imgs = []
+        for img_path in img_path_list:
+            img = cv2.imread(img_path)
+            if img is None:
+                raise ValueError(f"Image not found or can't be read at path: {img_path}")
+            imgs.append(img)
+        # Apply augmentation
+        if self.transform:
+            imgs, ball_xys, visibilities= self.transform(imgs, ball_xys, visibilities)
+        
+        converted_imgs = []
+        for img in imgs:    
+            # after transform all images will be in shape (H, W, C)
+            img = np.transpose(img, (2, 0, 1))  # Now img is (C, H, W)
+            converted_imgs.append(img)
+      
+        image_list=[]
+
+        i = 0
+        while i < len(converted_imgs):
+            image_list.append(np.array(converted_imgs[i]))
+            i+=1
+        
+        image_list_np = np.array(image_list)
+        ball_xys_np = np.array(ball_xys)
+        visibilities_np = np.array(visibilities)
+        status_np = np.array(status)
+        masked_frameid = len(converted_imgs)-1
+        return image_list_np, (masked_frameid, ball_xys_np, visibilities_np, status_np)
+
+
+
+class Bounce_Dataset(Dataset):
+    def __init__(self, events_infor, events_label, transform=None, num_samples=None):
+        self.events_infor = events_infor
+        self.events_label = events_label
+        self.transform = transform
+
+        if num_samples is not None:
+            self.events_infor = self.events_infor[:num_samples]
+
+    def __len__(self):
+        return len(self.events_infor)
+
+    def __getitem__(self, index):
+        ball_pos_list = self.events_infor[index]
+        event = self.events_label[index]
+
+        # Apply augmentation
+        if self.transform:
+            ball_pos_list = self.transform(ball_pos_list)
+        
+      
+        return ball_pos_list, event
+
+
+class Table_Dataset(Dataset):
+    def __init__(self, events_infor, events_label, transform=None, num_samples=None):
+        self.events_infor = events_infor
+        self.events_label = events_label
+        self.transform = transform
+
+        if num_samples is not None:
+            self.events_infor = self.events_infor[:num_samples]
+
+    def __len__(self):
+        return len(self.events_infor)
+
+    def __getitem__(self, index):
+        img_path = self.events_infor[index]
+        table_corners = self.events_label[index]
+
+        # Load the image
+        img = cv2.imread(img_path)
+        if img is None:
+            print(f"Warning: Image not found or can't be read at path: {img_path}")
+            img = np.full((1080, 1920, 3), (0, 0, 0), dtype=np.uint8)  # Placeholder black image
+        
+        table_corners = list(table_corners)
+
+        # **Step 1: Apply Transformations First**
+        if self.transform:
+            img, table_corners = self.transform(img, table_corners)
+        img_extra = img
+        # # **Step 2: Extract contours and edges AFTER transformations**
+        # contour_map = self.get_contour_map(img)  # Get contour feature
+        # edge_map = self.get_edge_map(img)  # Get edge feature
+
+        # # Convert to correct format (H, W)
+        # contour_map = np.expand_dims(contour_map, axis=2)  # Add channel dim
+        # edge_map = np.expand_dims(edge_map, axis=2)  # Add channel dim
+
+        # # **Step 3: Stack transformed image with new features**
+        # img_extra = np.concatenate((img, contour_map, edge_map), axis=2)  # Shape: (H, W, 5)
+
+        # Convert to PyTorch format (C, H, W)
+        img_extra = np.transpose(img_extra, (2, 0, 1))  # Now img is (C, H, W)
+        table_corners = np.array(table_corners, dtype=np.int32)
+
+        return img_extra, table_corners
+
+    def get_contour_map(self, img):
+        """Extracts contours from the image and returns a binary mask."""
+        if img.dtype != np.uint8:  # Ensure the image is in uint8 format
+            img = (img * 255).astype(np.uint8)  # Convert to uint8 (0-255)
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)  # Now it will work
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        _, thresh = cv2.threshold(blurred, 127, 255, cv2.THRESH_BINARY)
+        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        contour_map = np.zeros_like(gray)
+        cv2.drawContours(contour_map, contours, -1, (255), thickness=2)  # Draw contours on mask
+
+        return contour_map.astype(np.uint8)  # Ensure the output is also uint8
+
+    def get_edge_map(self, img):
+        """Extracts edges using Canny edge detection."""
+        if img.dtype != np.uint8:  # Ensure the image is in uint8 format
+            img = (img * 255).astype(np.uint8)  # Convert to uint8 (0-255)
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 100, 200)  # Detect edges
+
+        return edges.astype(np.uint8)  # Return as binary image (0 or 255)
 
 
 if __name__ == '__main__':

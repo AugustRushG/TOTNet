@@ -32,15 +32,15 @@ export NCCL_P2P_DISABLE=1
 
 
 ## TTA
-python work_flow.py \
-    --gpu_idx 0   \
-    --model_choice 'motion_light' \
-    --num_frames 5  \
-    --dataset_choice tta \
-    --video_path '../data/tta_dataset/test/videos/24Paralympics_FRA_M4_Addis_AUS_v_Chaiwut_THA/Game_3.mp4' \
-    --pretrained_path '../checkpoints/tracking_288_512_motion_light_TTA(5)_new_data/tracking_288_512_motion_light_TTA(5)_new_data_best.pth' \
-    --save_demo_output    \
-    --output_format video \
+# python work_flow.py \
+#     --gpu_idx 0   \
+#     --model_choice 'motion_light' \
+#     --num_frames 5  \
+#     --dataset_choice tta \
+#     --video_path '../data/tta_dataset/test/videos/24Paralympics_FRA_M4_Addis_AUS_v_Chaiwut_THA/Game_3.mp4' \
+#     --pretrained_path '../checkpoints/tracking_288_512_motion_light_TTA(5)_new_data/tracking_288_512_motion_light_TTA(5)_new_data_best.pth' \
+#     --save_demo_output    \
+#     --output_format video \
 
 ## Tennis
 # python work_flow.py \

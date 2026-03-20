@@ -367,15 +367,10 @@ class TemporalConvNet(nn.Module):
         x = self.temp_reduce(x) 
         out = x.squeeze(dim=1).squeeze(dim=1) #[B, H, W]
 
-        # Sum along the width to get a vertical heatmap (along H dimension)
-        vertical_heatmap = out.max(dim=2)[0]   # Shape: [B, H]
-        # Sum along the height to get a horizontal heatmap (along W dimension)
-        horizontal_heatmap = out.max(dim=1)[0]   # Shape: [B, W]
-        
-        vertical_heatmap = self.softmax(vertical_heatmap)
-        horizontal_heatmap = self.softmax(horizontal_heatmap) 
+        heatmap = out.view(B, H*W) # Reshape to [B, H*W] for softmax
+        heatmap = self.softmax(heatmap)  # Apply softmax to the heatmap
 
-        return (horizontal_heatmap, vertical_heatmap), None
+        return heatmap
 
 
 
@@ -393,36 +388,55 @@ if __name__ == '__main__':
 
     configs = parse_configs()
     configs.num_frames = 5
-    configs.device = 'cpu'
+    configs.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     configs.batch_size = 5
     configs.img_size = (288, 512)
     configs.dataset_choice = 'tennis'
-    # Create dataloaders
-    train_dataloader, val_dataloader, train_sampler = create_occlusion_train_val_dataloader(configs)
-    batch_data, (masked_frameids, labels, _, _) = next(iter(train_dataloader))
-    batch_data = batch_data.to(configs.device)
+    # # Create dataloaders
+    # train_dataloader, val_dataloader, train_sampler = create_occlusion_train_val_dataloader(configs)
+    # batch_data, (masked_frameids, labels, _, _) = next(iter(train_dataloader))
+    # batch_data = batch_data.to(configs.device)
 
-    # print(torch.unique(batch_data))
-    # batch_data = torch.randn([8, 5, 3, 288, 512])
+    # # print(torch.unique(batch_data))
+    batch_data = torch.randn([8, 5, 3, 288, 512])
 
-    B, N, C, H, W = batch_data.shape
+    # B, N, C, H, W = batch_data.shape
    
 
     # network = SaliencyMask().to(configs.device)
     # print(f"attention model num params is {get_num_parameters(network)}")
     # output = network(batch_data.float())
 
-    motion_model = build_motion_model_light(configs)
-    print(f"motion model num params is {get_num_parameters(motion_model)}")
-    # Start timer for data loading
+    motion_model = build_motion_model_light_opticalflow(configs)
+    # print(f"motion model num params is {get_num_parameters(motion_model)}")
+    # # Start timer for data loading
     start_time = time.time()
-    #Forward pass through the backbone
-    motion_features, cls= motion_model(batch_data.float())
+    # #Forward pass through the backbone
+    motion_features, cls= motion_model(batch_data.float().to(configs.device))
     forward_pass_time = time.time() - start_time
-
+    fps_rate = batch_data.shape[0] / forward_pass_time
     print(f"Forward pass time: {forward_pass_time:.4f} seconds")
-    print(f"Features stacked_features Shape: horizontal {motion_features[0].shape},   vertical {motion_features[1].shape}")  # Expected: [B*P, 3, 2048, 34, 60]
-    print(f"cls score is {cls}")
+    print(f"FPS rate: {fps_rate:.2f} frames per second")
 
-    print(torch.unique(motion_features[0]))
+    # print(f"Forward pass time: {forward_pass_time:.4f} seconds")
+    # print(f"Features stacked_features Shape: horizontal {motion_features[0].shape},   vertical {motion_features[1].shape}")  # Expected: [B*P, 3, 2048, 34, 60]
+    # print(f"cls score is {cls}")
+
+    # print(torch.unique(motion_features[0]))
+    # from ptflops import get_model_complexity_info
+
+
+    # motion_model = build_motion_model_light_opticalflow(configs)
+    # macs, params = get_model_complexity_info(
+    #     motion_model,
+    #     (5, 3, 288, 512),
+    #     print_per_layer_stat=False,
+    #     as_strings=True,
+    # )
+
+    # # Convert MACs string to numeric GFLOPs estimate
+    # macs_val = float(macs.replace(' GMac', '').strip())
+    # flops = f"{2 * macs_val:.2f} GFLOPs"
+
+    # print(f"MACs: {macs}, Params: {params}, Approx FLOPs: {flops}")
     

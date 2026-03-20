@@ -6,30 +6,19 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import torch.utils.data.distributed
+from utils.logger import Logger
 from tqdm import tqdm
 
 sys.path.append('./')
 
 from data_process.dataloader import create_occlusion_test_dataloader, create_occlusion_train_val_dataloader
 from model.model_utils import make_data_parallel, get_num_parameters, load_pretrained_model
-# from model.deformable_detection_model import build_detector
-# from model.propose_model import build_detector
-from model.tracknet import build_TrackerNet, build_TrackNetV2
-from model.mamba_model import build_mamba
-from model.two_stream_network import build_two_streams_model
-from model.wasb import build_wasb
-from model.motion_model import build_motion_model
-from PhysicsInformedDeformableAttentionNetwork.src.model.TOTNet import build_motion_model_light
-from PhysicsInformedDeformableAttentionNetwork.src.model.TOTNet_OF import build_motion_model_light_opticalflow
-from model.motion_model_light_v2 import build_motion_model_lightv2
-from model.monoTrack import build_monoTrack
-from model.TTNet import build_TTNet
-from losses_metrics.metrics import heatmap_calculate_metrics, calculate_rmse, precision_recall_f1_tracknet, extract_coords, classification_metrics
+from model import Model_Loader
+from losses_metrics import Metrics
 from utils.misc import AverageMeter
 from utils.visualization import visualize_and_save_2d_heatmap, save_batch_optical_flow_visualization
 from config.config import parse_configs
 
-from PhysicsInformedDeformableAttentionNetwork.src.model.TOTNet_OF import OpticalFlowMdel
 
 def main():
     configs = parse_configs()
@@ -73,61 +62,26 @@ def main_worker(gpu_idx, configs):
     configs.is_master_node = (not configs.distributed) or (
             configs.distributed and (configs.rank % configs.ngpus_per_node == 0))
 
-    if configs.model_choice == 'wasb':
-        print("Building WASB model...")
-        model = build_wasb(configs)
-    elif configs.model_choice == 'tracknetv2':
-        print("Building TrackNetV2 model...")
-        model = build_TrackNetV2(configs)
-    elif configs.model_choice == 'mamba':
-        print("Building Mamba model...")
-        model = build_mamba(configs)
-    elif configs.model_choice == 'motion':
-        print("Building Motion model...")
-        model = build_motion_model(configs)
-    elif configs.model_choice == 'two_stream_model':
-        print("Building Two Streams model...")
-        model = build_two_streams_model(configs)
-    elif configs.model_choice == 'motion_light':
-        print("Building Motion Light model...")
-        model = build_motion_model_light(configs)
-    elif configs.model_choice == 'motion_light_opticalflow':
-        print("Building Motion Light Optical Flow model...")
-        model = build_motion_model_light_opticalflow(configs)
-    elif configs.model_choice == 'motion_lightv2':
-        print("Building motion light v2")
-        model = build_motion_model_lightv2(configs)
-    elif configs.model_choice == 'monoTrack':
-        print("Building MonoTrack")
-        model = build_monoTrack(configs)
-    elif configs.model_choice == 'TTNet':
-        print("Building TTNet")
-        model = build_TTNet(configs)
-    else:
-        raise ValueError(f"Unknown model choice: {configs.model_choice}")
-
-
+    model = Model_Loader(configs).load_model()
     model = make_data_parallel(model, configs)
 
     if configs.is_master_node:
         num_parameters = get_num_parameters(model)
         print('number of trained parameters of the model: {}'.format(num_parameters))
 
+        logger = Logger(configs.logs_dir, 'test')
+        logger.info('>>> Created a new logger')
+        logger.info('>>> configs: {}'.format(configs))
+
     if configs.pretrained_path is not None:
         model = load_pretrained_model(model, configs.pretrained_path, gpu_idx)
-    # Load dataset
-    # test_loader = create_normal_test_dataloader(configs)
-    # train_loader, val_loader, train_sampler = create_occlusion_train_val_dataloader(configs, subset_size=configs.num_samples)
-    # print(f"number of batches in test is {len(val_loader)}")
-    # test(val_loader, model, configs)
-
  
     test_loader = create_occlusion_test_dataloader(configs, configs.num_samples)
     print(f"number of batches in test is {len(test_loader)}")
-    test(test_loader, model, configs)
+    test(test_loader, model, configs, logger)
 
 
-def test(test_loader, model, configs):
+def test(test_loader, model, configs, logger):
     # Initialize metrics for each visibility category
     visibility_metrics = { 
         vis: {
@@ -142,10 +96,13 @@ def test(test_loader, model, configs):
     precision_overall = AverageMeter('Precision', '6.4f')
     recall_overall = AverageMeter('Recall', '6.4f')
     f1_overall = AverageMeter('F1', '6.4f')
+    predictions = []
+    labels_list = []
 
     # calculate fps rate
     total_time = 0
     total_frames = 0
+    metrics = Metrics(configs, configs.device)
 
     # switch to evaluate mode
     model.eval()
@@ -161,7 +118,7 @@ def test(test_loader, model, configs):
 
 
             # Compute output
-            if configs.model_choice == 'tracknet' or  configs.model_choice == 'tracknetv2' or configs.model_choice == 'wasb' or configs.model_choice == 'monoTrack' or configs.model_choice == 'TTNet':
+            if configs.model_choice in ['tracknet', 'tracknetv2', 'wasb', 'monoTrack', 'TTNet', 'tracknetv4']:
                 # #for tracknet we need to rehsape the data
                 B, N, C, H, W = batch_data.shape
                 # Permute to bring frames and channels together
@@ -170,19 +127,21 @@ def test(test_loader, model, configs):
                 batch_data = batch_data.view(B, N * C, H, W)  # Shape: [B, N*C, H, W]
 
             start_time = time.perf_counter()  # Start timing
-            output_heatmap, _ = model(batch_data.float())
+            output_heatmap = model(batch_data.float())
             end_time = time.perf_counter()  # End timing
             
             total_time += end_time - start_time  # Accumulate time
 
-            mse, rmse, _, _ = heatmap_calculate_metrics(output_heatmap, labels)
-            post_processed_coords = extract_coords(output_heatmap)
-            precision, recall, f1, accuracy = precision_recall_f1_tracknet(
-                post_processed_coords, labels, distance_threshold=configs.ball_size
+            mse, rmse, _, _ = metrics.calculate_metrics(output_heatmap, labels)
+            post_processed_coords = metrics.extract_coordinates(output_heatmap)
+            precision, recall, f1, accuracy = metrics.precision_recall_f1(
+                post_processed_coords, labels
             )
+            # Store predictions and labels for overall metrics
+            predictions.append(post_processed_coords.cpu())
+            labels_list.append(labels.cpu())
 
             # Update metrics for each sample by visibility
-
             for sample_idx in range(batch_size):
                
                 vis_label = visibility[sample_idx].item()  # Visibility label for this sample
@@ -190,7 +149,7 @@ def test(test_loader, model, configs):
                 pred_coords = post_processed_coords[sample_idx]
                 x_pred, y_pred = pred_coords[0], pred_coords[1]
 
-                sample_rmse = calculate_rmse(label[0], label[1], x_pred, y_pred)
+                sample_rmse = metrics.calculate_rmse(label[0], label[1], x_pred, y_pred)
 
                 # Check if prediction is within threshold for accuracy
                 dist = torch.sqrt((pred_coords[0] - label[0])**2 + (pred_coords[1] - label[1])**2)
@@ -204,7 +163,7 @@ def test(test_loader, model, configs):
                 # Update visibility-specific metrics
                 visibility_metrics[vis_label]["distance"].update(sample_rmse)
                 visibility_metrics[vis_label]["accuracy"].update(sample_accuracy)
-                print(f"""Visibility {vis_label} - Ball Detection - Overall: (x, y) - org: ({label[0].item()}, {label[1].item()}), prediction = ({x_pred.item()}, {y_pred.item()}, distance is {sample_rmse:.4f})""")
+                logger.info(f"""Visibility {vis_label} - Ball Detection - Overall: (x, y) - org: ({label[0].item()}, {label[1].item()}), prediction = ({x_pred.item()}, {y_pred.item()}, distance is {sample_rmse:.4f})""")
 
 
             # Update overall metrics
@@ -214,25 +173,34 @@ def test(test_loader, model, configs):
             recall_overall.update(recall)
             f1_overall.update(f1)
 
+    predictions = torch.cat(predictions, dim=0)
+    labels_list = torch.cat(labels_list, dim=0)
+
+    pck_results = metrics.calculate_pck(
+        predictions, labels_list, thresholds=[1, 2, 3, 4, 5]
+    )
 
     total_frames = len(test_loader)*batch_size
 
     fps = total_frames / total_time if total_time > 0 else 0
 
     # Print results for each visibility category
-    print("===== Visibility-Specific Results =====")
+    logger.info("===== Visibility-Specific Results =====")
     for vis_label, metrics in visibility_metrics.items():
-        print(
+        logger.info(
             f"Visibility {vis_label}: Distance: {metrics['distance'].avg:.4f}, "
             f"Accuracy: {metrics['accuracy'].avg:.4f}"
         )
+
     
     # Print overall results
-    print(
+    logger.info("===== Overall Results =====")
+    logger.info(
         f"Overall Results: RMSE: {rmse_overall.avg:.4f}, Accuracy: {accuracy_overall.avg:.4f}, \n"
         f"Precision: {precision_overall.avg:.4f}, Recall: {recall_overall.avg:.4f}, F1: {f1_overall.avg:.4f}, \n"
         f"Model fps rate: {fps:.0f}"
     )
+    logger.info(f"PCK Results: {pck_results}")
 
 
 if __name__ == '__main__':

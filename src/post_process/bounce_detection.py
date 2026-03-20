@@ -119,7 +119,7 @@ class Bounce_Detection:
             return []  # No data to analyze
 
         # Extract Y-coordinates from ball positions
-        y_coords = [pos[1] for pos in ball_coordinates]
+        y_coords = [pos[1] for pos in ball_coordinates if pos[1]!=-1]
         y_coords = np.array(y_coords)
 
         outlier_indices = []

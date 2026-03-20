@@ -4,18 +4,18 @@ import logging
 
 class Logger():
     """
-        Create logger to save logs during training
+        Create logger to save logs during training or testing
         Args:
-            logs_dir:
-            saved_fn:
+            logs_dir: Directory where log files will be saved
+            mode: Either 'train' or 'test' to specify the log file name
 
         Returns:
 
         """
 
-    def __init__(self, logs_dir, saved_fn):
-        print(logs_dir, saved_fn)
-        logger_fn = 'logger_{}.txt'.format(saved_fn)
+    def __init__(self, logs_dir, mode='train'):
+        print(logs_dir, mode)
+        logger_fn = '{}.txt'.format(mode)
         logger_path = os.path.join(logs_dir, logger_fn)
 
         self.logger = logging.getLogger(__name__)

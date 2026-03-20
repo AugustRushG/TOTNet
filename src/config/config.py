@@ -6,7 +6,6 @@ import sys
 from easydict import EasyDict as edict
 from utils.misc import make_folder
 
-
 def parse_configs():
     parser = argparse.ArgumentParser(description='PIDA')
     parser.add_argument('--seed', type=int, default=2024,
@@ -72,6 +71,8 @@ def parse_configs():
         default=[1, 2, 2, 3],  # Default as a list
         help="Specify the weighting of loss bce(e.g., --weighting_list 1 2 2 3)"
     )
+    parser.add_argument('--num_channels', type=int, default=64, 
+                        help="number of channels for model")
     
     
     ####################################################################
@@ -126,6 +127,8 @@ def parse_configs():
                         help='which dataset to use tt for table tennis, tennis for tennis')
     parser.add_argument('--event', action='store_true',
                         help='If true, use event dataset, which is only available in tt dataset! ')
+    parser.add_argument('--mimo', action='store_true',
+                        help='If true, use mimo setting, which means multiple in and multiple out ')
     parser.add_argument('--bidirect', action='store_true',
                         help='If true, ball frame will be middle not last, if false will be last')
     parser.add_argument('--sequential', action='store_true',
@@ -140,6 +143,10 @@ def parse_configs():
         default=(288, 512),
         help="Specify the new image size as width and height (e.g., --img_size 540 960)"
     )
+    parser.add_argument('--resize', type=tuple,
+                        help='resize the image to this size, it should be a tuple of (width,height), e.g., (398, 224)')
+    parser.add_argument('--new_data', action='store_true',
+                        help='If true, use new data for training, which is the data from TTA dataset')
     
 
     ####################################################################
@@ -187,7 +194,7 @@ def parse_configs():
 
     # configs.dataset_dir = os.path.join(configs.working_dir, 'dataset')
 
-    configs.dataset_dir = os.path.join('../', 'dataset')
+    configs.dataset_dir = os.path.join('/home/s224705071/github/PhysicsInformedDeformableAttentionNetwork/data/', 'tt')
     configs.train_game_list = ['game_1', 'game_2', 'game_3', 'game_4', 'game_5']
     configs.test_game_list = ['test_1', 'test_2', 'test_3', 'test_4', 'test_5', 'test_6', 'test_7']
     configs.events_dict = {
@@ -208,13 +215,15 @@ def parse_configs():
     configs.tennis_test_game_list = ['game9', 'game10']
 
 
-    configs.badminton_dataset_dir = os.path.join('../data/badminton/TrackNetV2')
+    configs.badminton_dataset_dir = os.path.join('/home/s224705071/github/PhysicsInformedDeformableAttentionNetwork/data/badminton/TrackNetV2')
     configs.badminton_train_game_list = ['Amateur', 'Professional']
     configs.badminton_test_game_list = ['Test']
 
-    configs.tta_dataset_dir = os.path.join('../data/tta_dataset')
-    configs.tta_training_match_list = ['24Paralympics_FRA_F9_Lei_AUS_v_Xiong_CHN', '24Paralympics_FRA_M4_Addis_AUS_v_Chaiwut_THA']
+    configs.tta_dataset_dir = os.path.join('/home/s224705071/github/PhysicsInformedDeformableAttentionNetwork/data/tta_dataset')
+    configs.tta_training_match_list = ['24Paralympics_FRA_F9_Lei_AUS_v_Xiong_CHN', '24Paralympics_FRA_M4_Addis_AUS_v_Chaiwut_THA', '24Paralympics_FRA_M9_Ma_AUS_v_Didier_FRA']
     configs.tta_test_match_list = ['24Paralympics_FRA_M4_Addis_AUS_v_Chaiwut_THA']
+
+    configs.tta_tracking_dataset_dir = os.path.join('/home/s224705071/github/PhysicsInformedDeformableAttentionNetwork/data/tta_tracking')
 
     make_folder(configs.checkpoints_dir)
     make_folder(configs.logs_dir)

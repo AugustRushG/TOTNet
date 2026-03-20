@@ -47,7 +47,7 @@ class Denormalize():
 
 class Resize(object):
     def __init__(self, new_size, p=0.5, interpolation=cv2.INTER_LANCZOS4):
-        self.new_size = new_size  # new_size should be (width, height)
+        self.new_size = new_size  # new_size should be (height, width)
         self.p = p
         self.interpolation = interpolation
 
@@ -66,15 +66,15 @@ class Resize(object):
             return imgs, ball_position_xy, visibility
 
         # Original image dimensions (assuming imgs[0] has the original size)
-        original_w, original_h, _ = imgs[0].shape
+        original_h, original_w, _ = imgs[0].shape
 
         # New image dimensions
-        new_w, new_h = self.new_size
+        new_h, new_w = self.new_size
         
         # Resize a sequence of images
         transformed_imgs = []
         for img in imgs:
-            transformed_img = cv2.resize(img, (new_h, new_w), interpolation=self.interpolation)
+            transformed_img = cv2.resize(img, (new_w, new_h), interpolation=self.interpolation)
             transformed_imgs.append(transformed_img)
 
         # Adjust ball position
@@ -121,6 +121,43 @@ class Random_Crop(object):
                 if i == len(imgs):
                     transformed_ball_pos = np.array([(ball_position_xy[0] - min_x) * w_ratio,
                                             (ball_position_xy[1] - min_y) * h_ratio])
+
+        return transformed_imgs, transformed_ball_pos, visibility
+    
+class Center_Crop(object):
+    def __init__(self, target_size=(224, 224), p=1.0):
+        """
+        Args:
+            target_size (tuple): The (height, width) to center crop to.
+            p (float): Probability of applying the transform.
+        """
+        self.target_h, self.target_w = target_size
+        self.p = p
+
+    def __call__(self, imgs, ball_position_xy, visibility):
+        transformed_imgs = imgs.copy()
+        transformed_ball_pos = ball_position_xy.copy()
+
+        if random.random() <= self.p:
+            h, w, c = imgs[0].shape
+
+            # Ensure target size doesn't exceed original size
+            assert self.target_h <= h and self.target_w <= w, "Target crop size must be less than or equal to original size"
+
+            # Compute crop window centered
+            min_x = (w - self.target_w) // 2
+            max_x = min_x + self.target_w
+            min_y = (h - self.target_h) // 2
+            max_y = min_y + self.target_h
+
+            # Apply center crop
+            transformed_imgs = [img[min_y:max_y, min_x:max_x, :] for img in imgs]
+
+            # Update ball position
+            transformed_ball_pos = np.array([
+                ball_position_xy[0] - min_x,
+                ball_position_xy[1] - min_y
+            ])
 
         return transformed_imgs, transformed_ball_pos, visibility
 

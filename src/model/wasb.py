@@ -483,8 +483,9 @@ class HRNet(nn.Module):
             for i in range(self.num_deconvs):
                 x = self.deconv_layers[i][scale](x)
             y = self.final_layers[scale](x)
-            y_out[scale] = post_process_heatmap(y)
-        return (y_out[0][0], y_out[0][1]), None
+            # y_out[scale] = post_process_heatmap(y)
+            heatmap_2d = post_process_2dheatmap(y)
+        return heatmap_2d
 
     def init_weights(self, pretrained='',):
         logger.info('=> init weights from normal distribution')
@@ -506,6 +507,26 @@ class HRNet(nn.Module):
                     '=> loading {} pretrained model {}'.format(k, pretrained))
             model_dict.update(pretrained_dict)
             self.load_state_dict(model_dict)
+
+def post_process_2dheatmap(heatmap):
+    """
+    Post-process a heatmap to produce two 1D distributions over height and width.
+
+    Args:
+    - heatmap: Tensor of shape [b, n, h, w] (batch, n frames, height, width).
+
+    Returns:
+    - vertical_heatmap: Tensor of shape [b, h], softmaxed along the height.
+    - horizontal_heatmap: Tensor of shape [b, w], softmaxed along the width.
+    """
+    B, N, H, W = heatmap.shape
+    heatmap = heatmap[:,-1:,:] # [b,1,h,w]
+    # squeeze the frame dimension
+    heatmap = heatmap.squeeze(dim=1)  # [b, h, w]
+    heatmap = heatmap.view(B, H*W) # Reshape to [B, H*W] for softmax
+    heatmap = torch.softmax(heatmap, dim=-1)  # Apply softmax along the flattened dimension
+
+    return heatmap
 
 def post_process_heatmap(heatmap):
     """
@@ -546,28 +567,25 @@ def build_wasb(args):
 if __name__=='__main__':
     from config.config import parse_configs
     from data_process.dataloader import create_occlusion_train_val_dataloader
+    import time
 
     configs = parse_configs()
-    configs.device = 'cpu'
+    configs.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     configs.num_frames = 5
-    configs.img_size = (270, 480)
+    configs.img_size = (288, 512)
     configs.dataset_choice = 'tt'
 
-    train_dataloader, val_dataloader, train_sampler = create_occlusion_train_val_dataloader(configs) 
-    batch_data, (masked_frameids, labels, _, _) = next(iter(train_dataloader)) # batch data will be in shape [B, N, C, H, W]
-    B, N, C, H, W = batch_data.shape
-    # print(torch.unique(batch_data))
-    # Permute to bring frames and channels together
-    stacked_data = batch_data.permute(0, 2, 1, 3, 4).contiguous()  # Shape: [B, C, N, H, W]
-
-    # Reshape to combine frames into the channel dimension
-    stacked_data = stacked_data.view(B, N * C, H, W).float()  # Shape: [B, N*C, H, W]
-    stacked_data = stacked_data.to(configs.device)
-
     model = build_wasb(configs)
-    horizontal_heatmap, vertical_heatmap = model(stacked_data)
-    # print(y[0].shape, y[1].shape)
-    print(vertical_heatmap.shape, horizontal_heatmap.shape)
-    print(torch.unique(vertical_heatmap))
+    
+    from TOTNet import benchmark_fps
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Number of trainable parameters: {parameters/1e6:.2f} M")
+    batch_data = torch.randn([5, 15, 288, 512])
+    results = benchmark_fps(model, batch_data, device=device)
+
+    print(f"Average time per pass: {results['avg_time']:.4f} s")
+    print(f"Throughput: {results['fps_frames']:.2f} frames/s")
+    print(f"Throughput: {results['fps_clips']:.2f} clips/s")
 
 

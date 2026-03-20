@@ -315,7 +315,6 @@ def get_all_detection_infor_bidirect(game_list, configs, dataset_type):
     return events_infor, events_labels
 
 
-
 def get_all_detection_infor(game_list, configs, dataset_type):
     num_frames = configs.num_frames - 1
 
@@ -608,6 +607,58 @@ def get_all_detection_infor_badminton(level_list, configs):
     return events_infor, events_labels
 
 
+def get_new_tracking_infor(dataset_dir, dataset_type, num_frames=5, resize=None, bidirect=False):
+    if dataset_type == 'train':
+        annos_file = os.path.join(dataset_dir, 'train.json')
+    else: 
+        annos_file = os.path.join(dataset_dir, 'test.json')
+    with open(annos_file, 'r') as f:
+        annos = json.load(f)
+    status = 1
+
+    events_infor = []
+    events_labels = []
+
+    for video in annos:
+        video_name = video['video'].split('/')[-1] # get rid of mp4 
+        if video_name.endswith('.mp4'):
+            video_name = video_name[:-4]
+        images_dir = os.path.join(dataset_dir, 'frames', video_name)
+        img_width = video['width']
+        img_height = video['height']
+        for element in video['ball_pos']:
+            frame = element['frame']
+            img_path_list = []
+            # frame will be the middle frame in the sequence
+            # append previous and next frames paths 
+            sub_frame_indices = [frame - (num_frames - 1) + i for i in range(num_frames)]
+            if bidirect:
+                middle_frame = num_frames // 2
+                sub_frame_indices = [frame - (middle_frame - i) for i in range(num_frames)]
+            for sub_frame in sub_frame_indices:
+                img_path = os.path.join(images_dir, f'img_{sub_frame:06d}.jpg')
+                img_path_list.append(img_path)
+            if resize is not None:
+                x = int(element['ball_x'] * (resize[0] / img_width))
+                y = int(element['ball_y'] * (resize[1] / img_height))
+            else:
+                x = int(element['ball_x'])
+                y = int(element['ball_y'])
+            ball_position = np.array([x, y], dtype=int)
+            visibility = element['visibility'] 
+            if visibility == "V2":
+                visibility = 2
+            elif visibility == "V3":
+                visibility = 3
+            else:
+                visibility = 1
+            events_infor.append(img_path_list)
+            events_labels.append([ball_position, visibility, status])
+    
+    return events_infor, events_labels
+
+
+
 def get_all_detection_infor_tta(configs, dataset_type):
     num_frames = configs.num_frames - 1
     annos_dir = os.path.join(configs.tta_dataset_dir, dataset_type, 'annotations')
@@ -692,94 +743,29 @@ def get_all_detection_infor_tta(configs, dataset_type):
 
     return events_infor, events_labels
 
-def get_event_detection_infor_tta(configs, dataset_type):
-    num_frames = configs.num_frames - 1
-    annos_dir = os.path.join(configs.tta_dataset_dir, dataset_type, 'annotations')
-    images_dir = os.path.join(configs.tta_dataset_dir, dataset_type, 'images')
-    events_infor = []
-    events_labels = []
-    skipped_frame = 0
 
-    match_list = configs.tta_training_match_list if dataset_type == 'training' else configs.tta_test_match_list
 
-    for match_name in match_list:
-        ball_annos_dir = os.path.join(annos_dir, match_name)
-        match_image_dir = os.path.join(images_dir, match_name)
-  
-        for game in os.listdir(match_image_dir):
-            game_annos_path = os.path.join(ball_annos_dir, game, 'labels.csv')
-            game_image_path = os.path.join(match_image_dir, game)
-            
-            # Load ball annotations from CSV
-            ball_annos = []
-            try:
-                with open(game_annos_path, mode='r') as csv_file:
-                    csv_reader = csv.DictReader(csv_file)  # Use DictReader to load as a list of dictionaries
-                    for row in csv_reader:
-                        ball_annos.append(row)
-            except FileNotFoundError:
-                print(f"File not found: {game_annos_path}. Skipping...")
-                continue
-            
-            for row in ball_annos:
-                file_name = row['img']
-                image_name = os.path.basename(file_name)  # get image name 
-                visibility = int(row.get('visibility', [0])[0]) if row.get('visibility') and len(row['visibility']) > 0 else 0
-                status_mapping = {'Empty': 0, 'Bounce': 1}
-                status = status_mapping.get(row.get('event-type'), 0)
+def convert_ball_position(kp_value):
+    """Safely convert 'kp-1' string to (x, y) position"""
+    if not kp_value or kp_value == '':
+        return (0, 0)  # Default if no position is available
 
-                ball_annotation = row['kp-1']
-                if ball_annotation == '':
-                    x = 0
-                    y = 0
-                else:
-                    ball_annotation = ast.literal_eval(ball_annotation)[0]
-                    x = int(ball_annotation['x'] * ball_annotation['original_width'] / 100)  # Convert to pixel
-                    y = int(ball_annotation['y'] * ball_annotation['original_height'] / 100)  # Convert to pixel
-                
-                ball_frameidx = int(image_name[4:10])
-                # Create frame indices with the correct interval, with the key frame as the last frame
-                if configs.bidirect:
-                    middle_frame = num_frames // 2  # Middle frame index for bidirectional setting
-                    sub_ball_frame_indices = [
-                        ball_frameidx - (middle_frame - i)  # Adjust to have the middle as key frame
-                        for i in range(num_frames + 1)
-                    ]
-                else:
-                    sub_ball_frame_indices = [
-                        ball_frameidx - (num_frames - i)  # Adjust to have the last as key frame
-                        for i in range(num_frames + 1)
-                    ]
-            
-                img_path_list = []
-                for idx in sub_ball_frame_indices:
-                    img_path = os.path.join(game_image_path, f'img_{idx:06d}.jpg')
-                    img_path_list.append(img_path)
-                
-                # Check if any valid frames were found
-                if not img_path_list:
-                    print(f"No valid frames found for event at frame {ball_frameidx}.")
-                    continue
-                    
-                # if visibility!=3:
-                #     # print(f"Skipping event at frame {ball_frameidx} due to invalid last label.")
-                #     skipped_frame += 1
-                #     continue  # Skip this event if the last frame is invalid
-                
+    try:
+        ball_annotation = ast.literal_eval(kp_value)[0]  # Convert string to dictionary
+        x = int(ball_annotation['x'] * ball_annotation['original_width'] / 100)
+        y = int(ball_annotation['y'] * ball_annotation['original_height'] / 100)
+        return (x, y)
+    except (SyntaxError, ValueError, KeyError, IndexError):
+        return (0, 0)  # Return (0,0) if parsing fails
 
-                ball_position = np.array([x, y], dtype=int)
-                
-                if status == 1 and dataset_type=='training':
-                    for _ in range(5):
-                        events_infor.append(img_path_list)
-                        events_labels.append([ball_position, visibility, status])
-                else:
-                    events_infor.append(img_path_list)
-                    events_labels.append([ball_position, visibility, status])
 
-    print(f"{skipped_frame} skipped frame due to due to invalid last label")
+def compute_velocity(positions):
+    """Computes velocity (difference in y-coordinates)."""
+    return [positions[i+1][1] - positions[i][1] for i in range(len(positions) - 1)]
 
-    return events_infor, events_labels
+def compute_acceleration(velocities):
+    """Computes acceleration (difference in velocities)."""
+    return [velocities[i+1] - velocities[i] for i in range(len(velocities) - 1)]
 
 
 def train_val_data_separation(configs):
@@ -836,10 +822,7 @@ def train_val_data_separation(configs):
                                                                                                             random_state=configs.seed,
                                                                                                             )
     elif configs.dataset_choice == 'tta':
-        if configs.event == True:
-            events_infor, events_labels = get_event_detection_infor_tta(configs, 'training')
-        else:
-            events_infor, events_labels = get_all_detection_infor_tta(configs, 'training')
+        events_infor, events_labels = get_new_tracking_infor(configs.tta_tracking_dataset_dir, 'train', num_frames=configs.num_frames, resize=configs.resize, bidirect=configs.bidirect)
         if configs.no_val:
             train_events_infor = events_infor
             train_events_labels = events_labels
@@ -883,7 +866,6 @@ def get_visibility_distribution(events_labels):
     
     return dict(visibility_distribution)
 
-
 def get_status_distribution(events_labels):
     """
     Calculate the distribution of visibility labels in the dataset.
@@ -910,27 +892,33 @@ if __name__ == '__main__':
     configs = parse_configs()
     configs.num_frames = 5
     configs.interval = 1
-    configs.dataset_choice ='tta'
+    configs.dataset_choice ='tennis'
     # configs.event = True
-    configs.bidirect = True
+    # configs.bidirect = True
     configs.test = True
-    # configs.sequential = True
+
+    # events_infor, events_label = get_all_detection_infor_tennis(configs.tennis_train_game_list, configs)
+    # print(f"Number of events in training set: {len(events_infor)}")
+    # events_infor, events_label = get_all_detection_infor_tennis(configs.tennis_test_game_list, configs)
+    # print(f"Number of events in test set: {len(events_infor)}")
+
+    # events_infor, events_label = get_all_detection_infor_badminton(configs.badminton_train_game_list, configs)
+    # print(f"Number of events in badminton training set: {len(events_infor)}")
+    # events_infor, events_label = get_all_detection_infor_badminton(configs.badminton_test_game_list, configs)
+    # print(f"Number of events in badminton test set: {len(events_infor)}")
+    
+    # events_infor, events_labels = get_all_detection_infor(configs.train_game_list, configs, 'training')
+    # print(f"Number of events in training set: {len(events_infor)}")
+    # events_infor, events_labels = get_all_detection_infor(configs.test_game_list, configs, 'test')
+    # print(f"Number of events in test set: {len(events_infor)}")
+    # exit()
 
    
     train_events_infor, val_events_infor, train_events_labels, val_events_labels = train_val_data_separation(configs)
-    print(len(train_events_infor), len(train_events_labels), len(val_events_infor), len(val_events_labels))
-    test_events_infor, test_events_labels = get_event_detection_infor_tta(configs, 'test')
-    print(len(test_events_infor))
-
-    dataset_type = 'test'
-    # if configs.event:
-    #     test_events_infor, test_events_labels = get_events_infor_noseg(configs.test_game_list, configs, dataset_type)
-    # else:
-    #     test_events_infor, test_events_labels = get_all_detection_infor(configs.test_game_list, configs, dataset_type)
-    
-    print(train_events_infor[30])
-    print(train_events_labels[30])
-
+    # test_events_infor, test_events_labels = get_all_detection_infor_badminton(configs.badminton_test_game_list, configs)
+    # test_events_infor, test_events_labels = get_all_detection_infor(configs.test_game_list, configs, 'test')
+    test_events_infor, test_events_labels = get_all_detection_infor_tennis(configs.tennis_test_game_list, configs)
+    # test_events_infor, test_events_labels = get_new_tracking_infor(configs.tta_tracking_dataset_dir, 'test', num_frames=configs.num_frames, resize=configs.resize, bidirect=configs.bidirect)
     # Get distributions for train and validation datasets
     train_visibility_distribution = get_visibility_distribution(train_events_labels)
     val_visibility_distribution = get_visibility_distribution(val_events_labels)
@@ -940,14 +928,18 @@ if __name__ == '__main__':
     val_status_distribution = get_status_distribution(val_events_labels)
     test_status_distribution = get_status_distribution(test_events_labels)
 
+    # print total samples count 
+    print(f"Total training samples: {len(train_events_infor)}")
+    print(f"Total validation samples: {len(val_events_infor)}")
+    print(f"Total test samples: {len(test_events_infor)}")
     # Print the results
     print("Train Visibility Distribution:", train_visibility_distribution)
     print("Validation Visibility Distribution:", val_visibility_distribution)
     print("Test", test_visibility_distribution)
 
      # Print the results
-    print("Train status Distribution:", train_status_distribution)
-    print("Validation status Distribution:", val_status_distribution)
-    print("Test", test_status_distribution)
+    # print("Train status Distribution:", train_status_distribution)
+    # print("Validation status Distribution:", val_status_distribution)
+    # print("Test", test_status_distribution)
 
     

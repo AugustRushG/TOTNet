@@ -11,3 +11,4 @@ tqdm
 scipy
 ninja
 tensorboard
+ptflops

@@ -1,64 +1,43 @@
+from typing import Union, Optional
 import torch
 import numpy as np
 import csv
 import os
-from sklearn.metrics import precision_score, recall_score, f1_score
+from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 
-import csv
-import os
-from sklearn.metrics import precision_score, recall_score, f1_score
+import torch
 
-def bounce_metrics(ball_positions, csv_file_path, frame_tolerance=5):
+
+def extract_coords2d(pred_heatmap, H, W):
     """
-    Calculate bounce detection metrics (precision, recall, F1-score) based on predicted and actual bounce frames.
+    Extracts (x, y) coordinates from a predicted flattened 2D heatmap.
 
     Args:
-        ball_positions (list): List of tuples, where each tuple is (frame_id, (x, y)) representing
-                               the frame ID and ball coordinates.
-        csv_file_path (str): Path to the CSV file containing ground truth bounce information.
-        frame_tolerance (int): The allowed tolerance (in frames) to consider a bounce as correct.
+        pred_heatmap (Tensor):
+            Predicted heatmap of shape [B, H*W].
+            Can be probabilities or logits.
+        H (int): height of the heatmap.
+        W (int): width of the heatmap.
 
     Returns:
-        dict: A dictionary containing precision, recall, and F1-score.
+        Tensor: [B, 2] with (x, y) coordinates for each batch item.
     """
-    # Get all predicted frame IDs from ball_positions
-    predict_frame_list = [frame for frame, _ in ball_positions]
+    if pred_heatmap.dim() != 2 or pred_heatmap.size(1) != H * W:
+        raise ValueError(f"Expected shape [B, {H*W}], got {list(pred_heatmap.shape)}")
 
-    # Get all actual bounce frame IDs from the CSV file
-    actual_frame_list = []
-    with open(csv_file_path, mode='r') as csv_file:
-        csv_reader = csv.DictReader(csv_file)  # Use DictReader to load as a list of dictionaries
-        for row in csv_reader:
-            file_name = row['img']
-            image_name = os.path.basename(file_name)  # Get image name
-            ball_frameidx = int(image_name[4:10])  # Extract the frame index from the image name
-            status_mapping = {'Empty': 0, 'Bounce': 1}
-            status = status_mapping.get(row.get('event-type'), 2)
-            if status == 1:
-                actual_frame_list.append(ball_frameidx)
+    B = pred_heatmap.size(0)
 
-    # Match predicted frames to actual frames within tolerance
-    matched_frames = set()
-    for predicted_frame in predict_frame_list:
-        for actual_frame in actual_frame_list:
-            if abs(predicted_frame - actual_frame) <= frame_tolerance:
-                matched_frames.add(actual_frame)
-                break
+    # Argmax to get the flat index of the highest-probability pixel
+    flat_idx = pred_heatmap.argmax(dim=1)  # [B]
 
-    # Calculate metrics
-    y_true = [1 if frame in actual_frame_list else 0 for frame in range(max(max(predict_frame_list, default=0), max(actual_frame_list, default=0)) + 1)]
-    y_pred = [1 if frame in predict_frame_list else 0 for frame in range(len(y_true))]
+    # Convert flat index to (x, y)
+    x_pred = (flat_idx % W).float()        # [B]
+    y_pred = (flat_idx // W).float()       # [B]
 
-    precision = precision_score(y_true, y_pred)
-    recall = recall_score(y_true, y_pred)
-    f1 = f1_score(y_true, y_pred)
+    # Stack into [B, 2]
+    pred_coords = torch.stack([x_pred, y_pred], dim=1)
 
-    return {
-        'precision': precision,
-        'recall': recall,
-        'f1_score': f1
-    }
-
+    return pred_coords
 
 
 def extract_coords(pred_heatmap):
@@ -85,6 +64,103 @@ def extract_coords(pred_heatmap):
     pred_coords = torch.stack([x_pred, y_pred], dim=1)  # [B, 2]
 
     return pred_coords
+
+
+def extract_coords_mimo(pred_heatmap):
+    """
+    Args:
+        pred_heatmap: tuple of tensors (pred_x_logits, pred_y_logits)
+            - pred_x_logits: [B, N, W]
+            - pred_y_logits: [B, N, H]
+              where B = batch size, N = number of frames, W/H = width/height logits
+    Returns:
+        pred_coords: [B, N, 2] containing (x, y) coordinates for each frame
+    """
+    pred_x_logits, pred_y_logits = pred_heatmap
+    # pred_x_logits: [B, N, W]
+    # pred_y_logits: [B, N, H]
+
+    # For each sample in B, each frame in N, take argmax along width/height dimension
+    x_pred_indices = torch.argmax(pred_x_logits, dim=2)  # [B, N]
+    y_pred_indices = torch.argmax(pred_y_logits, dim=2)  # [B, N]
+
+    # Convert indices to float
+    x_pred = x_pred_indices.float()
+    y_pred = y_pred_indices.float()
+
+    # Stack along the last dimension => [B, N, 2]
+    pred_coords = torch.stack([x_pred, y_pred], dim=2)
+
+    return pred_coords
+
+
+
+def heatmap2d_calculate_metrics(pred_map, target_coords, H, W, scale=None):
+    """
+    Calculates metrics between a predicted flattened 2D heatmap and target (x,y) coords.
+
+    Args:
+    - pred_map: Tensor [B, H*W] with logits/probabilities over pixels
+    - target_coords: Tensor [B,2] with ground-truth (x, y) coords
+    - H, W: int, height and width of the heatmap
+    - scale: Optional scaling for predicted coords:
+        * scalar (float/int)
+        * Tensor [] (scalar), [2] (sx,sy), [B] (per-sample scalar), or [B,2] (per-sample (sx,sy))
+
+    Returns:
+    - mse, rmse, mae, euclidean_distance (Python floats)
+    """
+    if pred_map.dim() != 2 or pred_map.size(1) != H * W:
+        raise ValueError(f"pred_map must be [B, {H*W}], got {list(pred_map.shape)}")
+
+    B = pred_map.size(0)
+    device = pred_map.device
+
+    target_coords = target_coords.to(device).float()
+
+    # Argmax over flattened spatial dimension
+    flat_idx = pred_map.argmax(dim=1)          # [B]
+    x_pred = (flat_idx % W).float()            # [B]
+    y_pred = (flat_idx // W).float()           # [B]
+    pred_coords = torch.stack([x_pred, y_pred], dim=1)  # [B,2]
+
+    # Optional scaling
+    if scale is not None:
+        if torch.is_tensor(scale):
+            s = scale.to(device).float()
+            if s.ndim == 0:                        # scalar
+                pred_coords = pred_coords * s
+            elif s.ndim == 1:
+                if s.numel() == 2:                 # (sx, sy)
+                    pred_coords = pred_coords * s.view(1, 2)
+                elif s.numel() == B:               # per-sample scalar
+                    pred_coords = pred_coords * s.view(B, 1)
+                else:
+                    raise ValueError("scale 1D tensor must be length 2 or B")
+            elif s.ndim == 2 and s.shape == (B, 2):  # per-sample (sx, sy)
+                pred_coords = pred_coords * s
+            else:
+                raise ValueError("scale shape must be [], [2], [B], or [B,2]")
+        else:
+            pred_coords = pred_coords * float(scale)
+
+    # Compute errors
+    diff = pred_coords - target_coords  # [B,2]
+
+    mse_per_sample = (diff ** 2).mean(dim=1)   # [B]
+    mse = mse_per_sample.mean()
+
+    rmse_per_sample = torch.sqrt(mse_per_sample + 1e-12)  # [B]
+    rmse = rmse_per_sample.mean()
+
+    mae_per_sample = diff.abs().mean(dim=1)    # [B]
+    mae = mae_per_sample.mean()
+
+    euclidean_distance_per_sample = torch.norm(diff, dim=1)  # [B]
+    euclidean_distance = euclidean_distance_per_sample.mean()
+
+    return mse.item(), rmse.item(), mae.item(), euclidean_distance.item()
+
 
 def heatmap_calculate_metrics(pred_logits, target_coords, scale=None):
     """
@@ -156,6 +232,94 @@ def heatmap_calculate_metrics(pred_logits, target_coords, scale=None):
 
     return mse.item(), rmse.item(), mae.item(), euclidean_distance.item()
 
+
+
+def heatmap_calculate_metrics_multi(
+    pred_logits,
+    target_coords,
+    scale=None
+):
+    """
+    Calculates evaluation metrics (MSE, RMSE, MAE, Euclidean distance)
+    for multi-frame predicted logits vs. ground-truth coordinates, skipping
+    frames where target_coords == (0,0).
+
+    Args:
+        pred_logits: tuple (pred_x_logits, pred_y_logits)
+          - pred_x_logits: [B, N, W]  (B=batch, N=frames, W=width)
+          - pred_y_logits: [B, N, H]  (B=batch, N=frames, H=height)
+        target_coords: [B, N, 2] ground-truth (x, y) integer pixel coords
+        scale: optional scaling factor to multiply predicted coords (e.g., if
+               working with downsampled heatmaps). Could be a scalar or matching shape.
+
+    Returns:
+        mse, rmse, mae, euclid_dist: floats computed over all valid frames
+                                     (those where target != (0,0)).
+        If there are no valid frames, returns 0 for each metric.
+    """
+
+    pred_x_logits, pred_y_logits = pred_logits
+    device = pred_x_logits.device
+
+    # Move target_coords to correct device and convert to float
+    target_coords = target_coords.to(device).float()  # [B, N, 2]
+    B, N, W = pred_x_logits.shape
+    _, _, H = pred_y_logits.shape  # same B, N, dimension = H
+
+    # Identify valid frames: (x != 0) & (y != 0)
+    # This yields a boolean mask of shape [B, N]
+    valid_mask = (target_coords[..., 0] != 0) | (target_coords[..., 1] != 0)
+    # NOTE: If you want (x != 0 AND y != 0) to be valid, do '&' instead of '|'
+
+    # Find argmax along width/height => predicted indices => shape [B, N]
+    x_pred_indices = torch.argmax(pred_x_logits, dim=2)
+    y_pred_indices = torch.argmax(pred_y_logits, dim=2)
+
+    x_pred = x_pred_indices.float()
+    y_pred = y_pred_indices.float()
+
+    # Stack => shape [B, N, 2]
+    pred_coords = torch.stack([x_pred, y_pred], dim=2)
+
+    # Optionally apply scaling
+    if scale is not None:
+        pred_coords = pred_coords * scale
+
+    # Compute difference => shape [B, N, 2]
+    diff = pred_coords - target_coords
+
+    # Convert valid_mask from [B, N] to [B, N, 1] for broadcast
+    valid_mask_expanded = valid_mask.unsqueeze(-1)  # shape [B, N, 1]
+
+    # Filter out invalid frames by setting diff to 0 where invalid
+    # Alternatively, we can gather only valid frames, but let's keep shape
+    diff_valid = diff * valid_mask_expanded  # invalid frames => diff=0
+
+    # Count valid frames
+    valid_count = valid_mask.sum().item()
+    if valid_count == 0:
+        # No valid frames => return zeros
+        return 0.0, 0.0, 0.0, 0.0
+
+    # MSE per frame => mean over last dim => shape [B, N]
+    mse_per_frame = torch.mean(diff_valid ** 2, dim=2)
+    # For invalid frames => the result is 0, so sum & divide by valid_count only
+    mse = mse_per_frame.sum() / valid_count
+
+    # RMSE per frame => sqrt(MSE per frame) => shape [B, N]
+    rmse_per_frame = torch.sqrt(mse_per_frame)
+    rmse = rmse_per_frame.sum() / valid_count
+
+    # MAE per frame => mean(|diff|) => shape [B, N]
+    mae_per_frame = torch.mean(torch.abs(diff_valid), dim=2)
+    mae = mae_per_frame.sum() / valid_count
+
+    # Euclidean distance per frame => norm => shape [B, N]
+    euclid_per_frame = torch.norm(diff_valid, dim=2)
+    euclid_dist = euclid_per_frame.sum() / valid_count
+
+    return mse.item(), rmse.item(), mae.item(), euclid_dist.item()
+
 def precision_recall_f1(pred_heatmap, target_coords, threshold=0.5):
     """
     Calculates precision, recall, and F1 score for a tracking model with separate x and y heatmaps.
@@ -216,6 +380,65 @@ def precision_recall_f1(pred_heatmap, target_coords, threshold=0.5):
 
     return precision, recall, f1_score
 
+
+def precision_recall_f1_tracknet_mimo(pred_coords, target_coords, distance_threshold=5.0):
+    """
+    Calculates precision, recall, F1 score, and accuracy for TrackNet-style tracking 
+    when both predicted and target coordinates have shape [B, N, 2]:
+      - B = batch size
+      - N = number of frames
+      - 2 = (x, y) coordinates
+
+    A detection is considered a true positive if:
+      - The ground truth (target) is not (0, 0) for that frame
+      - The predicted coords are not (0, 0)
+      - The Euclidean distance <= distance_threshold
+
+    Args:
+        pred_coords:   [B, N, 2] predicted (x, y) coordinates for each frame
+        target_coords: [B, N, 2] ground truth (x, y) coordinates
+        distance_threshold: float, maximum distance for a detection to be a true positive
+
+    Returns:
+        precision, recall, f1_score, accuracy: floats computed over the entire batch+frames
+    """
+    device = pred_coords.device
+    # 1) Identify non-zero frames
+    #    (x != 0) & (y != 0) => "ball is in frame"
+    pred_nonzero = (pred_coords[..., 0] != 0) & (pred_coords[..., 1] != 0)   # [B, N]
+    target_nonzero = (target_coords[..., 0] != 0) & (target_coords[..., 1] != 0) # [B, N]
+
+    # 2) Compute Euclidean distances for every (b, n)
+    #    shape: [B, N]
+    distances = torch.norm(pred_coords - target_coords, dim=2)
+
+    # 3) Define True Positive (TP), False Positive (FP), False Negative (FN), True Negative (TN)
+    # TP: both nonzero + distance <= threshold
+    tp_mask = target_nonzero & pred_nonzero & (distances <= distance_threshold)
+    tp = tp_mask.sum().float()
+
+    # FP: both nonzero + distance > threshold
+    fp_mask = target_nonzero & pred_nonzero & (distances > distance_threshold)
+    fp = fp_mask.sum().float()
+
+    # FN: target nonzero, prediction zero
+    fn_mask = target_nonzero & (~pred_nonzero)
+    fn = fn_mask.sum().float()
+
+    # TN: target zero, prediction zero
+    tn_mask = (~target_nonzero) & (~pred_nonzero)
+    tn = tn_mask.sum().float()
+
+    eps = 1e-8
+    # 4) Compute Precision, Recall, F1
+    precision = tp / (tp + fp + eps)
+    recall = tp / (tp + fn + eps)
+    f1_score = 2.0 * (precision * recall) / (precision + recall + eps)
+
+    # 5) Compute Accuracy
+    accuracy = (tp + tn) / (tp + fp + fn + tn + eps)
+
+    return precision.item(), recall.item(), f1_score.item(), accuracy.item()
 
 def precision_recall_f1_tracknet(pred_coords, target_coords, distance_threshold=5):
     """
@@ -530,3 +753,103 @@ def batch_SPCE(batch_prediction_events, batch_target_events, thresh=0.25):
     batch_spce = (diff <= thresh).all(dim=1).float()  # 1 if all within threshold, 0 otherwise
     
     return batch_spce.mean()
+
+
+
+def pck_calculation(
+        pred_coords: torch.Tensor,
+        target_coords: torch.Tensor,
+        thresholds,
+        norm: Optional[Union[float, torch.Tensor]] = None,
+        mask: Optional[torch.Tensor] = None,
+    ):
+    """
+    Calculate Percentage of Correct Keypoints (PCK) over one or many thresholds.
+
+    Args:
+        pred_coords (torch.Tensor): Predicted coords, shape [B, 2].
+        target_coords (torch.Tensor): Ground-truth coords, shape [B, 2].
+        thresholds (list | tuple | torch.Tensor | float): Distance threshold(s).
+            If multiple, returns a PCK value per threshold.
+        norm (float | torch.Tensor | None): Optional normalization factor.
+            - If float: distances are divided by this scalar.
+            - If tensor of shape [B]: per-sample normalization.
+            - If None: raw pixel distances are used.
+        mask (torch.Tensor | None): Optional boolean mask of shape [B].
+            True keeps a sample; False excludes it from PCK.
+
+    Returns:
+        dict with:
+            - 'pck': torch.Tensor of shape [T], PCK at each threshold.
+            - 'thresholds': torch.Tensor of shape [T], thresholds used.
+            - 'distances': torch.Tensor of shape [N], distances actually evaluated (after masking & normalization).
+            - 'num_samples': int, number of samples used.
+    """
+    # ensure tensors & dtypes
+    pred = pred_coords.float()
+    tgt  = target_coords.float()
+
+    # pairwise Euclidean distances (B,)
+    dists = torch.linalg.norm(pred - tgt, dim=-1)  # sqrt(dx^2 + dy^2)
+
+    # optional normalization
+    if norm is not None:
+        if not torch.is_tensor(norm):
+            norm = torch.tensor(norm, dtype=dists.dtype, device=dists.device)
+        dists = dists / norm
+
+    # optional mask
+    if mask is not None:
+        keep = mask.bool()
+        dists = dists[keep]
+
+    # guard: no samples left
+    if dists.numel() == 0:
+        thr = torch.as_tensor(thresholds, dtype=torch.float32)
+        return {
+            "pck": torch.zeros_like(thr),
+            "thresholds": thr,
+            "distances": dists,
+            "num_samples": 0
+        }
+
+    # thresholds -> tensor on same device
+    thr = torch.as_tensor(thresholds, dtype=dists.dtype, device=dists.device).flatten()
+
+    # vectorized correctness: (N,1) <= (1,T) -> (N,T)
+    correct = (dists[:, None] <= thr[None, :]).float()
+
+    # PCK per threshold (mean over samples)
+    pck = correct.mean(dim=0)
+
+    result = {
+        "pck": pck,                 # [T]
+        "thresholds": thr,          # [T]
+        "distances": dists,         # [N]
+        "num_samples": int(dists.numel())
+    }
+
+    print(result)
+
+
+    return result
+
+
+def print_pck_results(pck_out, title="PCK Results"):
+    """
+    Nicely print PCK results from pck_calculation.
+    """
+    pck = pck_out["pck"].cpu().numpy()
+    thresholds = pck_out["thresholds"].cpu().numpy()
+    n = pck_out["num_samples"]
+
+    print(f"\n=== {title} ===")
+    print(f"Evaluated on {n} samples")
+    print("-" * 30)
+    print(f"{'Threshold':>10} | {'PCK':>6}")
+    print("-" * 30)
+    for t, v in zip(thresholds, pck):
+        print(f"{t:10.2f} | {v*100:5.2f}%")
+    print("-" * 30)
+    print(f"AUC-PCK (1..{int(thresholds.max())}): "
+          f"{np.trapz(pck, thresholds)/(thresholds.max()-thresholds.min()):.3f}")

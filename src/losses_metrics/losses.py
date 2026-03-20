@@ -3,6 +3,226 @@ import torch
 import torch.nn.functional as F
 
 
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class Heatmap_Ball_Detection_Loss_Weighted_MultiFrame(nn.Module):
+    def __init__(self, weighted_list=[1, 2, 2, 3], sigma=0.3):
+        """
+        Args:
+            weighted_list: List of 4 weights, one for each visibility class [0..3].
+            sigma: Std dev for Gaussian smoothing (if visibility == 3).
+        """
+        super().__init__()
+        self.loss_fn = nn.BCELoss(reduction="none")  # We'll handle reduction manually
+        self.weighted_list = weighted_list
+        self.sigma = sigma
+
+    def forward(self, output, target_ball_position, visibility):
+        """
+        Args:
+            output: tuple (pred_x, pred_y) each of shape [B, N, W] or [B, N, H]
+                    B = batch size, N = number of frames, W/H = width/height
+            target_ball_position: [B, N, 2] integer (x, y) pixel coords
+            visibility: [B, N] integer visibility per frame [0..3]
+        Returns:
+            A scalar loss (float)
+        """
+        pred_x, pred_y = output  # pred_x: [B, N, W], pred_y: [B, N, H]
+
+        device = pred_x.device
+        B, N, W = pred_x.shape
+        _, _, H = pred_y.shape  # Same B, N, but dimension is H
+
+        # Convert target coords to int and clamp
+        target_x = target_ball_position[..., 0].long().clamp_(0, W - 1)  # [B, N]
+        target_y = target_ball_position[..., 1].long().clamp_(0, H - 1)  # [B, N]
+
+        # Build zero-maps for x and y
+        target_x_map = torch.zeros_like(pred_x)  # [B, N, W]
+        target_y_map = torch.zeros_like(pred_y)  # [B, N, H]
+
+        # Identify frames that are valid (not (0,0)) => skip_mask is True if we skip
+        skip_mask = (target_ball_position[..., 0] == 0) & (target_ball_position[..., 1] == 0)
+
+        # Identify frames that want Gaussian smoothing (visibility == 3)
+        gaussian_mask = (visibility == 3) & (~skip_mask)  # Must be valid + vis==3
+
+        # 1) Create one-hot target for non-gaussian frames
+        # We'll do a for-loop for clarity, but you can vectorize if desired
+        for b in range(B):
+            for n in range(N):
+                if skip_mask[b, n]:
+                    continue  # Skip frames with (0,0)
+                if not gaussian_mask[b, n]:
+                    # Place a 1 at [b, n, target_x[b,n]] or [b, n, target_y[b,n]]
+                    tx = target_x[b, n]
+                    ty = target_y[b, n]
+                    target_x_map[b, n, tx] = 1.0
+                    target_y_map[b, n, ty] = 1.0
+
+        # 2) Create Gaussian targets for frames with vis=3
+        #    Then normalize each row to sum to 1
+        if gaussian_mask.any():
+            # Prepare coordinate grids
+            x_coords = torch.arange(W, device=device).float()  # [W]
+            y_coords = torch.arange(H, device=device).float()  # [H]
+
+            for b in range(B):
+                for n in range(N):
+                    if not gaussian_mask[b, n]:
+                        continue
+                    tx = target_x[b, n].float()
+                    ty = target_y[b, n].float()
+
+                    # Build Gaussian along X
+                    dx = x_coords - tx  # [W]
+                    gauss_x = torch.exp(-0.5 * (dx**2) / (self.sigma**2))  # shape [W]
+
+                    # Build Gaussian along Y
+                    dy = y_coords - ty  # [H]
+                    gauss_y = torch.exp(-0.5 * (dy**2) / (self.sigma**2))  # shape [H]
+
+                    # Normalize each so sum=1
+                    gauss_x = gauss_x / (gauss_x.sum() + 1e-8)
+                    gauss_y = gauss_y / (gauss_y.sum() + 1e-8)
+
+                    # Place them in target_x_map / target_y_map
+                    target_x_map[b, n] = gauss_x
+                    target_y_map[b, n] = gauss_y
+
+        # 3) Compute BCELoss w/o reduction
+        loss_x = self.loss_fn(pred_x, target_x_map)  # shape [B, N, W]
+        loss_y = self.loss_fn(pred_y, target_y_map)  # shape [B, N, H]
+
+        # Sum along W/H => [B, N]
+        loss_x = loss_x.sum(dim=2)
+        loss_y = loss_y.sum(dim=2)
+
+        # Combine or sum => shape [B, N]
+        loss_per_frame = loss_x + loss_y  # [B, N]
+
+        # Convert visibility to weights
+        weights_tensor = torch.tensor(self.weighted_list, device=device, dtype=torch.float)
+        frame_weights = weights_tensor[visibility]  # shape [B, N]
+
+        # Zero out skip frames entirely so they do not contribute
+        # Alternatively, you can just do skip_mask => loss_per_frame=0
+        loss_per_frame[skip_mask] = 0.0
+        frame_weights[skip_mask] = 0.0  # or 0.0 to exclude from sum
+
+        # Weighted loss
+        loss_weighted = loss_per_frame * frame_weights  # [B, N]
+
+        # Average across all valid frames (frames that are not skip_mask)
+        valid_mask = ~skip_mask
+        total_valid = valid_mask.sum().item()
+        if total_valid == 0:
+            # Edge case: no valid frames => return 0
+            return torch.tensor(0.0, device=device, requires_grad=True)
+
+        final_loss = loss_weighted.sum() / total_valid
+
+        return final_loss
+
+
+class HeatmapBallDetectionLoss2DWeighted(nn.Module):
+    def __init__(
+        self,
+        H: int,
+        W: int,
+        weighted_list = [1.0, 2.0, 2.0, 3.0],
+        sigmas = [0.8, 0.8, 1.0, 2.5],  # v0,v1,v2: tight; v3 (occluded): wide
+        use_logits: bool = False,
+        eps: float = 1e-7,
+    ):
+        """
+        Args:
+            H, W: spatial size of the heatmap.
+            weighted_list: per-visibility weights [w0,w1,w2,w3].
+            sigmas: per-visibility Gaussian std (pixels) [σ0,σ1,σ2,σ3].
+            use_logits: if True, expects logits + uses BCEWithLogitsLoss; else probabilities + BCELoss.
+            eps: clamp for BCELoss stability.
+        """
+        super().__init__()
+        self.H, self.W = int(H), int(W)
+        self.weighted_list = weighted_list
+        self.sigmas = sigmas
+        self.use_logits = use_logits
+        self.eps = eps
+        self.loss = nn.BCEWithLogitsLoss(reduction="none") if use_logits else nn.BCELoss(reduction="none")
+
+        # Precompute coordinate grids as buffers (broadcast-friendly shapes)
+        # Shapes: xs[1,1,W], ys[1,H,1]
+        self.register_buffer("xs", torch.arange(self.W).view(1, 1, self.W).float())
+        self.register_buffer("ys", torch.arange(self.H).view(1, self.H, 1).float())
+
+    def forward(self, pred_map: torch.Tensor, target_ball_position: torch.Tensor, visibility: torch.Tensor):
+        """
+        Args:
+            pred_map: [B, H*W] flattened heatmap (probabilities or logits).
+            target_ball_position: [B, 2] with (x, y) in pixel coords (can be float).
+            visibility: [B] in {0,1,2,3}.
+        Returns:
+            scalar loss
+        """
+        if pred_map.dim() != 2 or pred_map.size(1) != self.H * self.W:
+            raise ValueError(f"pred_map must be [B, {self.H*self.W}], got {list(pred_map.shape)}")
+
+        B = pred_map.size(0)
+        device = pred_map.device
+        dtype  = pred_map.dtype
+
+        # Build per-sample Gaussian targets with per-visibility sigma
+        # target_map -> [B, H, W]
+        target_map = torch.zeros((B, self.H, self.W), device=device, dtype=dtype)
+
+        # Coords
+        tx = target_ball_position[:, 0].clamp_(0, self.W - 1).to(dtype)  # [B]
+        ty = target_ball_position[:, 1].clamp_(0, self.H - 1).to(dtype)  # [B]
+
+        # Per-sample sigma from visibility
+        vis_w = torch.tensor(self.weighted_list, device=device, dtype=dtype)  # [4]
+        sigma_lut = torch.tensor(self.sigmas, device=device, dtype=dtype)     # [4]
+        sigma_vec = sigma_lut[visibility]                                     # [B]
+        denom = (2.0 * (sigma_vec ** 2)).view(B, 1, 1)                        # [B,1,1]
+
+        # Broadcast-friendly centers
+        gx = tx.view(B, 1, 1)  # [B,1,1]
+        gy = ty.view(B, 1, 1)  # [B,1,1]
+
+        # Ensure grids match dtype/device
+        xs = self.xs.to(device=device, dtype=dtype).expand(B, 1, self.W)   # [B,1,W]
+        ys = self.ys.to(device=device, dtype=dtype).expand(B, self.H, 1)   # [B,H,1]
+
+        # Gaussian map for every sample (vectorized)
+        dx2 = (xs - gx) ** 2          # [B,1,W]
+        dy2 = (ys - gy) ** 2          # [B,H,1]
+        gmap = torch.exp(-(dx2 + dy2) / denom)   # broadcast -> [B,H,W]
+
+        # Normalize each sample to sum=1
+        gsum = gmap.sum(dim=(1, 2), keepdim=True).clamp_min(1e-12)
+        target_map = gmap / gsum
+
+        # Flatten target to [B, H*W]
+        target_flat = target_map.view(B, self.H * self.W)
+
+        # Clamp preds if using probabilities
+        if not self.use_logits:
+            pred_map = pred_map.clamp(self.eps, 1.0 - self.eps)
+
+        # Per-element BCE -> per-sample -> weighted batch mean
+        per_elem = self.loss(pred_map, target_flat)     # [B, H*W]
+        per_sample = per_elem.sum(dim=1)                # [B]
+
+        sample_weights = vis_w[visibility]              # [B]
+        loss = (per_sample * sample_weights).mean()
+        return loss
+
+        
+
 class Heatmap_Ball_Detection_Loss_Weighted(nn.Module):
     def __init__(self, weighted_list=[1, 2, 2, 3], sigma=0.3):
         """
@@ -320,6 +540,40 @@ def events_spotting_loss(pred_events, target_events, weights=(1, 3), epsilon=1e-
     return loss
 
 
+class BinaryFocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0, epsilon=1e-9):
+        """
+        Binary Focal Loss to address class imbalance.
+
+        Args:
+            alpha (float): Balancing factor (higher values focus more on class 1).
+            gamma (float): Focusing parameter (higher values focus more on hard examples).
+            epsilon (float): Small value to avoid log(0).
+        """
+        super(BinaryFocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+
+    def forward(self, preds, targets):
+        """
+        Args:
+            preds (torch.Tensor): Model predictions (probabilities), shape [B,1].
+            targets (torch.Tensor): Ground truth labels, shape [B,1].
+
+        Returns:
+            torch.Tensor: Computed focal loss.
+        """
+        preds = torch.clamp(preds, min=self.epsilon, max=1.0 - self.epsilon)  # Prevent log(0) errors
+
+        # Compute focal loss components
+        focal_weight = self.alpha * targets + (1 - self.alpha) * (1 - targets)  # Alpha balancing
+        pt = targets * preds + (1 - targets) * (1 - preds)  # p_t for the correct class
+        focal_loss = -focal_weight * ((1.0 - pt) ** self.gamma) * torch.log(pt)  # Apply focal weighting
+
+        return focal_loss.mean()
+
+
 def focal_loss(pred_events, target_events, alpha=0.6, gamma=2.0, epsilon=1e-9):
     """
     Focal loss for imbalanced datasets.
@@ -552,8 +806,54 @@ if __name__ == "__main__":
     # loss_out_of_frame = loss_func((heat_map_x, heat_map_y), out_of_frame_target, 0)
     # print(f"Loss for out-of-frame target: {loss_out_of_frame.item()}")
 
-    print(generate_gaussian_map(width=288, target_x=50, sigma=0.45))
+    # print(generate_gaussian_map(width=288, target_x=50, sigma=0.45))
 
+    # --- setup ---
+    H, W = 288, 512
+    loss_function = HeatmapBallDetectionLoss2DWeighted(H=H, W=W, use_logits=False)  # your class
+
+    # targets
+    target_ball_position = torch.tensor([[100, 150],   # sample 0
+                                        [200, 250]])  # sample 1
+    visibility = torch.tensor([3, 1])  # v=3 -> Gaussian, v=1 -> one-hot
+
+    B = target_ball_position.size(0)
+    pred_map = torch.zeros(B, H*W)
+
+    # helper: gaussian matching the loss' sigma for v=3 (here sigma=self.sigma=0.3)
+    def gaussian_2d(H, W, cx, cy, sigma):
+        xs = torch.arange(W).view(1, 1, W).float()
+        ys = torch.arange(H).view(1, H, 1).float()
+        g = torch.exp(-(((xs - cx)**2 + (ys - cy)**2) / (2.0 * sigma**2)))
+        g = g / g.sum()
+        return g.view(-1)  # flatten to [H*W]
+
+    # --- make sample 0 "perfect" ---
+    cx0, cy0 = target_ball_position[0, 0].item(), target_ball_position[0, 1].item()
+    g0 = gaussian_2d(H, W, cx0, cy0, sigma=0.3)     # same sigma as the loss for v=3
+    pred_map[0] = g0                                # match target distribution -> very low loss
+
+    # --- make sample 1 "almost perfect" one-hot ---
+    cx1, cy1 = target_ball_position[1, 0].item(), target_ball_position[1, 1].item()
+    idx1 = cy1 * W + cx1
+    pred_map[1].fill_(1e-6)                         # tiny elsewhere
+    pred_map[1, idx1] = 1.0 - (H*W-1)*1e-6          # ~1 at GT, keeps probs in [0,1] and sums ~1 (not required for BCE)
+
+    # compute loss
+    loss = loss_function(pred_map, target_ball_position, visibility)
+    print(f"Loss (one perfect Gaussian, one near one-hot): {loss.item():.6f}")
+
+    from metrics import extract_coords2d, heatmap2d_calculate_metrics, precision_recall_f1_tracknet
+    # extract predicted coordinates from the heatmap
+    pred_coords = extract_coords2d(pred_map, H, W)
+    print(f"Predicted coordinates for sample 0: {pred_coords}")
+    # compute metrics
+    metrics = heatmap2d_calculate_metrics(pred_map, target_ball_position, H, W)
+    print(f"Metrics for sample 0: {metrics}")
+
+    # compute precision, recall, f1
+    precision, recall, f1, accuracy = precision_recall_f1_tracknet(pred_coords, target_ball_position)
+    print(f"Precision: {precision:.4f}, Recall: {recall:.4f}, F1: {f1:.4f} (Accuracy: {accuracy:.4f})")
 
 
 

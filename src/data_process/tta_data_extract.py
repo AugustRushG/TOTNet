@@ -49,7 +49,7 @@ def extract_images_from_videos(video_path, out_images_dir):
 
 if __name__ == '__main__':
     dataset_dir = '/home/s224705071/github/PhysicsInformedDeformableAttentionNetwork/data/tta_dataset'
-    game_name = '24Paralympics_FRA_M4_Addis_AUS_v_Chaiwut_THA'
+    game_name = '24Paralympics_FRA_M9_Ma_AUS_v_Didier_FRA'
     for dataset_type in ['training', 'test']:
         # Construct paths
         video_dir = os.path.join(dataset_dir, dataset_type, 'videos')  # Directory for videos
